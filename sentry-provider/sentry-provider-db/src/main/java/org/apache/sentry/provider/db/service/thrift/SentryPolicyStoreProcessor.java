@@ -22,6 +22,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.conf.Configuration;
@@ -49,6 +50,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
 @SuppressWarnings("unused")
@@ -149,8 +151,7 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     try {
       authorize(request.getRequestorUserName(),
           getRequestorGroups(request.getRequestorUserName()));
-      CommitContext commitContext = sentryStore.createSentryRole(request.getRoleName(),
-          request.getRequestorUserName());
+      CommitContext commitContext = sentryStore.createSentryRole(request.getRoleName());
       response.setStatus(Status.OK());
       notificationHandlerInvoker.create_sentry_role(commitContext,
           request, response);
@@ -178,9 +179,10 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
 
     TAlterSentryRoleGrantPrivilegeResponse response = new TAlterSentryRoleGrantPrivilegeResponse();
     try {
-      CommitContext commitContext = sentryStore.alterSentryRoleGrantPrivilege(request.getRoleName(),
-                                    request.getPrivilege());
+      CommitContext commitContext = sentryStore.alterSentryRoleGrantPrivilege(request.getRequestorUserName(),
+          request.getRoleName(), request.getPrivilege());
       response.setStatus(Status.OK());
+      response.setPrivilege(request.getPrivilege());
       notificationHandlerInvoker.alter_sentry_role_grant_privilege(commitContext,
           request, response);
     } catch (SentryNoSuchObjectException e) {
@@ -210,8 +212,8 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   (TAlterSentryRoleRevokePrivilegeRequest request) throws TException {
     TAlterSentryRoleRevokePrivilegeResponse response = new TAlterSentryRoleRevokePrivilegeResponse();
     try {
-      CommitContext commitContext = sentryStore.alterSentryRoleRevokePrivilege(request.getRoleName(),
-                                    request.getPrivilege());
+      CommitContext commitContext = sentryStore.alterSentryRoleRevokePrivilege(request.getRequestorUserName(),
+          request.getRoleName(), request.getPrivilege());
       response.setStatus(Status.OK());
       notificationHandlerInvoker.alter_sentry_role_revoke_privilege(commitContext,
           request, response);
@@ -345,11 +347,14 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
       if (AccessConstants.ALL.equalsIgnoreCase(request.getGroupName())) {
         checkAllGroups = true;
       } else {
-        if (!inAdminGroups(groups)) {
-          // non-admin can only list roles for their own group
-          if (!groups.contains(request.getGroupName())) {
-            throw new SentryAccessDeniedException("Access denied to " + subject);
-          }
+        boolean admin = inAdminGroups(groups);
+        //Only admin users can list all roles in the system ( groupname = null)
+        //Non admin users are only allowed to list only groups which they belong to
+        if(!admin && (request.getGroupName() == null || !groups.contains(request.getGroupName()))) {
+          throw new SentryAccessDeniedException("Access denied to " + subject);
+        }else {
+          groups.clear();
+          groups.add(request.getGroupName());
         }
       }
       roleSet = sentryStore.getTSentryRolesByGroupName(groups, checkAllGroups);
@@ -513,11 +518,33 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     try {
       authorize(request.getRequestorUserName(), adminGroups);
       sentryStore.renamePrivilege(request.getOldAuthorizable(),
-          request.getNewAuthorizable(), request.getRequestorUserName());
+          request.getNewAuthorizable());
       response.setStatus(Status.OK());
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (Exception e) {
+      String msg = "Unknown error for request: " + request + ", message: "
+          + e.getMessage();
+      LOGGER.error(msg, e);
+      response.setStatus(Status.RuntimeError(msg, e));
+    }
+    return response;
+  }
+
+  @Override
+  public TListSentryPrivilegesByAuthResponse list_sentry_privileges_by_authorizable(
+      TListSentryPrivilegesByAuthRequest request) throws TException {
+    TListSentryPrivilegesByAuthResponse response = new TListSentryPrivilegesByAuthResponse();
+    Map<TSentryAuthorizable, TSentryPrivilegeMap> authRoleMap = Maps.newHashMap();
+    try {
+      for (TSentryAuthorizable authorizable : request.getAuthorizableSet()) {
+        authRoleMap.put(authorizable, sentryStore
+            .listSentryPrivilegesByAuthorizable(request.getGroups(),
+                request.getRoleSet(), authorizable));
+      }
+      response.setPrivilegesMapByAuth(authRoleMap);
+      response.setStatus(Status.OK());
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: "
           + e.getMessage();
