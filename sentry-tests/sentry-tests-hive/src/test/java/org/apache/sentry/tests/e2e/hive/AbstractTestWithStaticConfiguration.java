@@ -19,6 +19,7 @@ package org.apache.sentry.tests.e2e.hive;
 import static org.apache.sentry.provider.common.ProviderConstants.AUTHORIZABLE_SPLITTER;
 import static org.apache.sentry.provider.common.ProviderConstants.PRIVILEGE_PREFIX;
 import static org.apache.sentry.provider.common.ProviderConstants.ROLE_SPLITTER;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -31,13 +32,15 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeoutException;
 
 import junit.framework.Assert;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
 import org.apache.sentry.binding.hive.SentryHiveAuthorizationTaskFactoryImpl;
@@ -48,19 +51,19 @@ import org.apache.sentry.policy.db.DBModelAuthorizables;
 import org.apache.sentry.provider.db.SimpleDBProviderBackend;
 import org.apache.sentry.provider.db.service.thrift.SentryPolicyServiceClient;
 import org.apache.sentry.provider.file.PolicyFile;
-import org.apache.sentry.service.thrift.SentryService;
 import org.apache.sentry.service.thrift.SentryServiceClientFactory;
-import org.apache.sentry.service.thrift.SentryServiceFactory;
 import org.apache.sentry.service.thrift.ServiceConstants.ClientConfig;
 import org.apache.sentry.service.thrift.ServiceConstants.ServerConfig;
 import org.apache.sentry.tests.e2e.hive.fs.DFS;
 import org.apache.sentry.tests.e2e.hive.fs.DFSFactory;
 import org.apache.sentry.tests.e2e.hive.hiveserver.HiveServer;
 import org.apache.sentry.tests.e2e.hive.hiveserver.HiveServerFactory;
+import org.apache.sentry.tests.e2e.minisentry.SentrySrvFactory;
+import org.apache.sentry.tests.e2e.minisentry.SentrySrvFactory.SentrySrvType;
+import org.apache.sentry.tests.e2e.minisentry.SentrySrv;
 import org.apache.tools.ant.util.StringUtils;
 import org.junit.After;
 import org.junit.AfterClass;
-import static org.junit.Assert.assertTrue;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.slf4j.Logger;
@@ -108,12 +111,15 @@ public abstract class AbstractTestWithStaticConfiguration {
   protected static final String SERVER_HOST = "localhost";
   private static final String EXTERNAL_SENTRY_SERVICE = "sentry.e2etest.external.sentry";
   protected static final String EXTERNAL_HIVE_LIB = "sentry.e2etest.hive.lib";
+  private static final String ENABLE_SENTRY_HA = "sentry.e2etest.enable.service.ha";
 
-  protected static boolean policy_on_hdfs = false;
+  protected static boolean policyOnHdfs = false;
   protected static boolean useSentryService = false;
-  protected static boolean setMetastoreListener = false;
+  protected static boolean setMetastoreListener = true;
   protected static String testServerType = null;
-
+  protected static boolean enableHiveConcurrency = false;
+  // indicate if the database need to be clear for every test case in one test class
+  protected static boolean clearDbPerTest = true;
 
   protected static File baseDir;
   protected static File logDir;
@@ -125,11 +131,11 @@ public abstract class AbstractTestWithStaticConfiguration {
   protected static HiveServerFactory.HiveServer2Type hiveServer2Type;
   protected static DFS dfs;
   protected static Map<String, String> properties;
-  protected static SentryService sentryServer;
+  protected static SentrySrv sentryServer;
   protected static Configuration sentryConf;
+  protected static boolean enableSentryHA = false;
   protected static Context context;
   protected final String semanticException = "SemanticException No valid privileges";
-
 
   public static void createContext() throws Exception {
     context = new Context(hiveServer, fileSystem,
@@ -186,9 +192,10 @@ public abstract class AbstractTestWithStaticConfiguration {
 
   @BeforeClass
   public static void setupTestStaticConfiguration() throws Exception {
+    LOGGER.info("AbstractTestWithStaticConfiguration setupTestStaticConfiguration");
     properties = Maps.newHashMap();
-    if(!policy_on_hdfs) {
-      policy_on_hdfs = new Boolean(System.getProperty("sentry.e2etest.policyonhdfs", "false"));
+    if(!policyOnHdfs) {
+      policyOnHdfs = new Boolean(System.getProperty("sentry.e2etest.policyonhdfs", "false"));
     }
     if (testServerType != null) {
       properties.put("sentry.e2etest.hiveServer2Type", testServerType);
@@ -204,35 +211,51 @@ public abstract class AbstractTestWithStaticConfiguration {
     dfs = DFSFactory.create(dfsType, baseDir, testServerType);
     fileSystem = dfs.getFileSystem();
 
-    String policyURI;
-
-    //TODO: We can probably get rid of this.
     PolicyFile policyFile = PolicyFile.setAdminOnServer1(ADMIN1)
         .setUserGroupMapping(StaticUserGroup.getStaticMapping());
     policyFile.write(policyFileLocation);
 
-    if (policy_on_hdfs) {
-      String dfsUri = fileSystem.getDefaultUri(fileSystem.getConf()).toString();
+    String policyURI;
+    if (policyOnHdfs) {
+      String dfsUri = FileSystem.getDefaultUri(fileSystem.getConf()).toString();
       LOGGER.error("dfsUri " + dfsUri);
-      policyURI = dfsUri + System.getProperty("sentry.e2etest.hive.policy.location", "/user/hive/sentry");
+      policyURI = dfsUri + System.getProperty("sentry.e2etest.hive.policy.location",
+          "/user/hive/sentry");
       policyURI += "/" + HiveServerFactory.AUTHZ_PROVIDER_FILENAME;
-      dfs.writePolicyFile(policyFileLocation);
     } else {
       policyURI = policyFileLocation.getPath();
     }
+
     boolean startSentry = new Boolean(System.getProperty(EXTERNAL_SENTRY_SERVICE, "false"));
+    if ("true".equalsIgnoreCase(System.getProperty(ENABLE_SENTRY_HA, "false"))) {
+      enableSentryHA = true;
+    }
     if (useSentryService && (!startSentry)) {
       setupSentryService();
+    }
+
+    if (enableHiveConcurrency) {
+      properties.put(HiveConf.ConfVars.HIVE_SUPPORT_CONCURRENCY.varname, "true");
+      properties.put(HiveConf.ConfVars.HIVE_TXN_MANAGER.varname,
+          "org.apache.hadoop.hive.ql.lockmgr.DummyTxnManager");
+      properties.put(HiveConf.ConfVars.HIVE_LOCK_MANAGER.varname,
+          "org.apache.hadoop.hive.ql.lockmgr.EmbeddedLockManager");
     }
 
     hiveServer = create(properties, baseDir, confDir, logDir, policyURI, fileSystem);
     hiveServer.start();
     createContext();
+
+    // Create tmp as scratch dir if it doesn't exist
+    Path tmpPath = new Path("/tmp");
+    if (!fileSystem.exists(tmpPath)) {
+      fileSystem.mkdirs(tmpPath, new FsPermission(FsAction.ALL, FsAction.ALL, FsAction.ALL));
+    }
   }
 
   public static HiveServer create(Map<String, String> properties,
-                                  File baseDir, File confDir, File logDir, String policyFile,
-                                  FileSystem fileSystem) throws Exception {
+      File baseDir, File confDir, File logDir, String policyFile,
+      FileSystem fileSystem) throws Exception {
     String type = properties.get(HiveServerFactory.HIVESERVER2_TYPE);
     if(type == null) {
       type = System.getProperty(HiveServerFactory.HIVESERVER2_TYPE);
@@ -245,17 +268,18 @@ public abstract class AbstractTestWithStaticConfiguration {
         baseDir, confDir, logDir, policyFile, fileSystem);
   }
 
-  protected void writePolicyFile(PolicyFile policyFile) throws Exception{
-
+  protected static void writePolicyFile(PolicyFile policyFile) throws Exception {
     policyFile.write(context.getPolicyFile());
-    if(policy_on_hdfs) {
+    if(policyOnHdfs) {
+      LOGGER.info("use policy file on HDFS");
       dfs.writePolicyFile(context.getPolicyFile());
     } else if(useSentryService) {
+      LOGGER.info("use sentry service, granting permissions");
       grantPermissions(policyFile);
     }
   }
 
-  private void grantPermissions(PolicyFile policyFile) throws Exception{
+  private static void grantPermissions(PolicyFile policyFile) throws Exception {
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
 
@@ -263,16 +287,20 @@ public abstract class AbstractTestWithStaticConfiguration {
     ResultSet resultSet = statement.executeQuery("SHOW ROLES");
     while( resultSet.next()) {
       Statement statement1 = context.createStatement(connection);
-      if(!resultSet.getString(1).equalsIgnoreCase("admin_role")) {
-        statement1.execute("DROP ROLE " + resultSet.getString(1));
+      String roleName = resultSet.getString(1).trim();
+      if(!roleName.equalsIgnoreCase("admin_role")) {
+        LOGGER.info("Dropping role :" + roleName);
+        statement1.execute("DROP ROLE " + roleName);
       }
     }
 
     // create roles and add privileges
     for (Map.Entry<String, Collection<String>> roleEntry : policyFile.getRolesToPermissions()
         .asMap().entrySet()) {
+      String roleName = roleEntry.getKey();
       if(!roleEntry.getKey().equalsIgnoreCase("admin_role")){
-        statement.execute("CREATE ROLE " + roleEntry.getKey());
+        LOGGER.info("Creating role : " + roleName);
+        statement.execute("CREATE ROLE " + roleName);
         for (String privilege : roleEntry.getValue()) {
           addPrivilege(roleEntry.getKey(), privilege, statement);
         }
@@ -283,14 +311,17 @@ public abstract class AbstractTestWithStaticConfiguration {
         .entrySet()) {
       for (String roleNames : groupEntry.getValue()) {
         for (String roleName : roleNames.split(",")) {
-            statement.execute("GRANT ROLE " + roleName + " TO GROUP " + groupEntry.getKey());
+          String sql = "GRANT ROLE " + roleName + " TO GROUP " + groupEntry.getKey();
+          LOGGER.info("Granting role to group: " + sql);
+          statement.execute(sql);
         }
       }
     }
   }
-  private void addPrivilege(String roleName, String privileges, Statement statement)
+
+  private static void addPrivilege(String roleName, String privileges, Statement statement)
       throws IOException, SQLException{
-    String serverName = null, dbName = null, tableName = null, uriPath = null;
+    String serverName = null, dbName = null, tableName = null, uriPath = null, columnName = null;
     String action = "ALL";//AccessConstants.ALL;
     for (String privilege : ROLE_SPLITTER.split(privileges)) {
       for(String section : AUTHORIZABLE_SPLITTER.split(privilege)) {
@@ -307,6 +338,8 @@ public abstract class AbstractTestWithStaticConfiguration {
             dbName = dbAuthorizable.getName();
           } else if (DBModelAuthorizable.AuthorizableType.Table.equals(dbAuthorizable.getAuthzType())) {
             tableName = dbAuthorizable.getName();
+          } else if (DBModelAuthorizable.AuthorizableType.Column.equals(dbAuthorizable.getAuthzType())) {
+            columnName = dbAuthorizable.getName();
           } else if (DBModelAuthorizable.AuthorizableType.URI.equals(dbAuthorizable.getAuthzType())) {
             uriPath = dbAuthorizable.getName();
           } else {
@@ -320,17 +353,31 @@ public abstract class AbstractTestWithStaticConfiguration {
         }
       }
 
-      if (tableName != null) {
+      LOGGER.info("addPrivilege");
+      if (columnName != null) {
         statement.execute("CREATE DATABASE IF NOT EXISTS " + dbName);
         statement.execute("USE " + dbName);
-        statement.execute("GRANT " + action + " ON TABLE " + tableName + " TO ROLE " + roleName);
+        String sql = "GRANT " + action + " ( " + columnName + " ) ON TABLE " + tableName + " TO ROLE " + roleName;
+        LOGGER.info("Granting column level privilege: database = " + dbName + ", sql = " + sql);
+        statement.execute(sql);
+      } else if (tableName != null) {
+        statement.execute("CREATE DATABASE IF NOT EXISTS " + dbName);
+        statement.execute("USE " + dbName);
+        String sql = "GRANT " + action + " ON TABLE " + tableName + " TO ROLE " + roleName;
+        LOGGER.info("Granting table level privilege:  database = " + dbName + ", sql = " + sql);
+        statement.execute(sql);
       } else if (dbName != null) {
-        statement.execute("GRANT " + action + " ON DATABASE " + dbName + " TO ROLE " + roleName);
+        String sql = "GRANT " + action + " ON DATABASE " + dbName + " TO ROLE " + roleName;
+        LOGGER.info("Granting db level privilege: " + sql);
+        statement.execute(sql);
       } else if (uriPath != null) {
-        statement.execute("GRANT " + action + " ON URI '" + uriPath + "' TO ROLE " + roleName);//ALL?
+        String sql = "GRANT " + action + " ON URI '" + uriPath + "' TO ROLE " + roleName;
+        LOGGER.info("Granting uri level privilege: " + sql);
+        statement.execute(sql);//ALL?
       } else if (serverName != null) {
-        statement.execute("GRANT ALL ON SERVER " + serverName + " TO ROLE " + roleName);
-        ;
+        String sql = "GRANT ALL ON SERVER " + serverName + " TO ROLE " + roleName;
+        LOGGER.info("Granting server level privilege: " + sql);
+        statement.execute(sql);
       }
     }
   }
@@ -344,7 +391,7 @@ public abstract class AbstractTestWithStaticConfiguration {
     properties.put(ConfVars.HIVE_AUTHORIZATION_TASK_FACTORY.varname,
         SentryHiveAuthorizationTaskFactoryImpl.class.getName());
     properties
-        .put(ConfVars.HIVE_SERVER2_THRIFT_MIN_WORKER_THREADS.varname, "2");
+    .put(ConfVars.HIVE_SERVER2_THRIFT_MIN_WORKER_THREADS.varname, "2");
     properties.put(ServerConfig.SECURITY_MODE, ServerConfig.SECURITY_MODE_NONE);
     properties.put(ServerConfig.ADMIN_GROUPS, ADMINGROUP);
     properties.put(ServerConfig.RPC_ADDRESS, SERVER_HOST);
@@ -353,80 +400,108 @@ public abstract class AbstractTestWithStaticConfiguration {
 
     properties.put(ServerConfig.SENTRY_STORE_JDBC_URL,
         "jdbc:derby:;databaseName=" + baseDir.getPath()
-            + "/sentrystore_db;create=true");
+        + "/sentrystore_db;create=true");
+    properties.put(ServerConfig.SENTRY_STORE_JDBC_PASS, "dummy");
     properties.put(ServerConfig.SENTRY_STORE_GROUP_MAPPING, ServerConfig.SENTRY_STORE_LOCAL_GROUP_MAPPING);
     properties.put(ServerConfig.SENTRY_STORE_GROUP_MAPPING_RESOURCE, policyFileLocation.getPath());
     properties.put(ServerConfig.RPC_MIN_THREADS, "3");
     for (Map.Entry<String, String> entry : properties.entrySet()) {
       sentryConf.set(entry.getKey(), entry.getValue());
     }
-    sentryServer = new SentryServiceFactory().create(sentryConf);
-    properties.put(ClientConfig.SERVER_RPC_ADDRESS, sentryServer.getAddress()
+    sentryServer = SentrySrvFactory.create(
+        SentrySrvType.INTERNAL_SERVER, sentryConf, enableSentryHA ? 2 : 1);
+    properties.put(ClientConfig.SERVER_RPC_ADDRESS, sentryServer.get(0)
+        .getAddress()
         .getHostName());
-    sentryConf.set(ClientConfig.SERVER_RPC_ADDRESS, sentryServer.getAddress()
+    sentryConf.set(ClientConfig.SERVER_RPC_ADDRESS, sentryServer.get(0)
+        .getAddress()
         .getHostName());
     properties.put(ClientConfig.SERVER_RPC_PORT,
-        String.valueOf(sentryServer.getAddress().getPort()));
+        String.valueOf(sentryServer.get(0).getAddress().getPort()));
     sentryConf.set(ClientConfig.SERVER_RPC_PORT,
-        String.valueOf(sentryServer.getAddress().getPort()));
+        String.valueOf(sentryServer.get(0).getAddress().getPort()));
+    if (enableSentryHA) {
+      properties.put(ClientConfig.SERVER_HA_ENABLED, "true");
+      properties.put(ClientConfig.SENTRY_HA_ZOOKEEPER_QUORUM,
+          sentryServer.getZKQuorum());
+    }
     startSentryService();
     if (setMetastoreListener) {
+      LOGGER.info("setMetastoreListener is enabled");
       properties.put(HiveConf.ConfVars.METASTORE_EVENT_LISTENERS.varname,
           SentryMetastorePostEventListener.class.getName());
     }
+
   }
 
   private static void startSentryService() throws Exception {
-    sentryServer.start();
-    final long start = System.currentTimeMillis();
-    while (!sentryServer.isRunning()) {
-      Thread.sleep(1000);
-      if (System.currentTimeMillis() - start > 60000L) {
-        throw new TimeoutException("Server did not start after 60 seconds");
-      }
-    }
+    sentryServer.startAll();
   }
 
   public static SentryPolicyServiceClient getSentryClient() throws Exception {
     if (sentryServer == null) {
       throw new IllegalAccessException("Sentry service not initialized");
     }
-    SentryServiceClientFactory factory = new SentryServiceClientFactory();
-    return factory.create(sentryServer.getConf());
+    return SentryServiceClientFactory.create(sentryServer.get(0).getConf());
   }
 
   @Before
   public void setup() throws Exception{
+    LOGGER.info("AbstractTestStaticConfiguration setup");
     dfs.createBaseDir();
+    if (clearDbPerTest) {
+      LOGGER.info("Before per test run clean up");
+      clearAll(true);
+    }
   }
 
   @After
-  public void clearDB() throws Exception {
-    Connection connection;
-    Statement statement;
-    connection = context.createConnection(ADMIN1);
-    statement = context.createStatement(connection);
-
-    String [] dbs = { DB1, DB2, DB3};
-    for (String db: dbs) {
-      statement.execute("DROP DATABASE if exists " + db + " CASCADE");
+  public void clearAfterPerTest() throws Exception {
+    LOGGER.info("AbstractTestStaticConfiguration clearAfterPerTest");
+    if (clearDbPerTest) {
+      LOGGER.info("After per test run clean up");
+      clearAll(true);
     }
+  }
+
+  protected static void clearAll(boolean clearDb) throws Exception {
+    LOGGER.info("About to run clearAll");
     ResultSet resultSet;
-    statement.execute("USE default");
-    resultSet = statement.executeQuery("SHOW tables");
-    while(resultSet.next()) {
-      Statement statement2 = context.createStatement(connection);
-      statement2.execute("DROP table " + resultSet.getString(1));
-      statement2.close();
+    Connection connection = context.createConnection(ADMIN1);
+    Statement statement = context.createStatement(connection);
+
+    if (clearDb) {
+      LOGGER.info("About to clear all databases and default database tables");
+      resultSet = statement.executeQuery("SHOW DATABASES");
+      ArrayList<String> dbs = new ArrayList<String>();
+      while(resultSet.next()) {
+        dbs.add(resultSet.getString(1));
+      }
+      for (String db : dbs) {
+        if(!db.equalsIgnoreCase("default")) {
+          statement.execute("DROP DATABASE if exists " + db + " CASCADE");
+        }
+      }
+      statement.execute("USE default");
+      resultSet = statement.executeQuery("SHOW tables");
+      while (resultSet.next()) {
+        Statement statement2 = context.createStatement(connection);
+        statement2.execute("DROP table " + resultSet.getString(1));
+        statement2.close();
+      }
     }
 
     if(useSentryService) {
+      LOGGER.info("About to clear all roles");
       resultSet = statement.executeQuery("SHOW roles");
       List<String> roles = new ArrayList<String>();
-      while ( resultSet.next()) {
-        roles.add(resultSet.getString(1));
+      while (resultSet.next()) {
+        String roleName = resultSet.getString(1);
+        if (!roleName.toLowerCase().contains("admin")) {
+          roles.add(roleName);
+        }
       }
-      for(String role:roles) {
+      for (String role : roles) {
         statement.execute("DROP Role " + role);
       }
     }
@@ -435,10 +510,10 @@ public abstract class AbstractTestWithStaticConfiguration {
 
   }
 
-  protected void setupAdmin() throws Exception {
-
+  protected static void setupAdmin() throws Exception {
     if(useSentryService) {
-    Connection connection = context.createConnection(ADMIN1);
+      LOGGER.info("setupAdmin to create admin_role");
+      Connection connection = context.createConnection(ADMIN1);
       Statement statement = connection.createStatement();
       try {
         statement.execute("CREATE ROLE admin_role");
@@ -453,6 +528,14 @@ public abstract class AbstractTestWithStaticConfiguration {
     }
   }
 
+  protected PolicyFile setupPolicy() throws Exception {
+    LOGGER.info("Pre create policy file with admin group mapping");
+    PolicyFile policyFile = PolicyFile.setAdminOnServer1(ADMINGROUP);
+    policyFile.setUserGroupMapping(StaticUserGroup.getStaticMapping());
+    writePolicyFile(policyFile);
+    return policyFile;
+  }
+
   @AfterClass
   public static void tearDownTestStaticConfiguration() throws Exception {
     if(hiveServer != null) {
@@ -461,8 +544,7 @@ public abstract class AbstractTestWithStaticConfiguration {
     }
 
     if (sentryServer != null) {
-      sentryServer.stop();
-      sentryServer = null;
+      sentryServer.close();
       sentryServer = null;
     }
 
@@ -483,4 +565,26 @@ public abstract class AbstractTestWithStaticConfiguration {
       context.close();
     }
   }
+
+  public static SentrySrv getSentrySrv() {
+    return sentryServer;
+  }
+
+  /**
+   * A convenience method to validate:
+   * if expected is equivalent to returned;
+   * Firstly check if each expected item is in the returned list;
+   * Secondly check if each returned item in in the expected list.
+   */
+  protected void validateReturnedResult(List<String> expected, List<String> returned) {
+    for (String obj : expected) {
+      assertTrue("expected " + obj + " not found in the returned list: " + returned.toString(),
+              returned.contains(obj));
+    }
+    for (String obj : returned) {
+      assertTrue("returned " + obj + " not found in the expected list: " + expected.toString(),
+              expected.contains(obj));
+    }
+  }
+
 }

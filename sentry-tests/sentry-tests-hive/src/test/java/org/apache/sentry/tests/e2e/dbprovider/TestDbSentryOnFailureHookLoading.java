@@ -21,34 +21,34 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
 
 import junit.framework.Assert;
 
 import org.apache.hadoop.hive.ql.plan.HiveOperation;
 import org.apache.sentry.binding.hive.conf.HiveAuthzConf;
 import org.apache.sentry.provider.db.SentryAccessDeniedException;
-import org.apache.sentry.provider.file.PolicyFile;
 import org.apache.sentry.tests.e2e.hive.DummySentryOnFailureHook;
-import org.apache.sentry.tests.e2e.hive.StaticUserGroup;
 import org.apache.sentry.tests.e2e.hive.hiveserver.HiveServerFactory;
+import org.junit.After;
 import org.junit.Assume;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestDbSentryOnFailureHookLoading extends AbstractTestWithDbProvider {
 
-  Map<String, String > testProperties;
 
-  @Before
-  public void setup() throws Exception {
-    testProperties = new HashMap<String, String>();
-    testProperties.put(HiveAuthzConf.AuthzConfVars.AUTHZ_ONFAILURE_HOOKS.getVar(),
+  @BeforeClass
+  public static void setup() throws Exception {
+    properties = new HashMap<String, String>();
+    properties.put(HiveAuthzConf.AuthzConfVars.AUTHZ_ONFAILURE_HOOKS.getVar(),
         DummySentryOnFailureHook.class.getName());
-    createContext(testProperties);
+    createContext();
     DummySentryOnFailureHook.invoked = false;
 
     // Do not run these tests if run with external HiveServer2
@@ -62,6 +62,29 @@ public class TestDbSentryOnFailureHookLoading extends AbstractTestWithDbProvider
     }
   }
 
+  @After
+  public void clearDB() throws Exception {
+    Connection connection;
+    Statement statement;
+    connection = context.createConnection(ADMIN1);
+    statement = context.createStatement(connection);
+    ResultSet resultSet;
+    resultSet = statement.executeQuery("SHOW roles");
+    List<String> roles = new ArrayList<String>();
+    while ( resultSet.next()) {
+      roles.add(resultSet.getString(1));
+    }
+    for(String role:roles) {
+      statement.execute("DROP Role " + role);
+    }
+
+    statement.close();
+    connection.close();
+    if (context != null) {
+      context.close();
+    }
+  }
+
   /* Admin creates database DB_2
    * user1 tries to drop DB_2, but it has permissions for DB_1.
    */
@@ -71,6 +94,11 @@ public class TestDbSentryOnFailureHookLoading extends AbstractTestWithDbProvider
     // setup db objects needed by the test
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
+    try {
+      statement.execute("DROP ROLE admin_role");
+    } catch (Exception ex) {
+      //It is ok if admin_role already exists
+    }
     statement.execute("CREATE ROLE admin_role");
     statement.execute("GRANT ALL ON SERVER "
         + HiveServerFactory.DEFAULT_AUTHZ_SERVER_NAME + " TO ROLE admin_role");

@@ -22,6 +22,7 @@ import org.apache.thrift.TMultiplexedProcessor;
 
 public abstract class ProcessorFactory {
   protected final Configuration conf;
+
   public ProcessorFactory(Configuration conf) {
     this.conf = conf;
   }

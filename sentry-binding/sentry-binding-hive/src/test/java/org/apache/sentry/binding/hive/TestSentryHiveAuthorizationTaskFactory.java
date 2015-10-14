@@ -18,11 +18,14 @@
 package org.apache.sentry.binding.hive;
 
 import junit.framework.Assert;
+
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hive.SentryHiveConstants;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
 import org.apache.hadoop.hive.metastore.api.PrincipalType;
 import org.apache.hadoop.hive.ql.Context;
+import org.apache.hadoop.hive.ql.exec.SentryHivePrivilegeObjectDesc;
 import org.apache.hadoop.hive.ql.exec.Task;
 import org.apache.hadoop.hive.ql.metadata.Hive;
 import org.apache.hadoop.hive.ql.metadata.Partition;
@@ -44,10 +47,14 @@ import org.apache.hadoop.hive.ql.plan.ShowGrantDesc;
 import org.apache.hadoop.hive.ql.security.HadoopDefaultAuthenticator;
 import org.apache.hadoop.hive.ql.security.authorization.Privilege;
 import org.apache.hadoop.hive.ql.session.SessionState;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import com.google.common.io.Files;
+
+import java.io.File;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
@@ -60,6 +67,8 @@ public class TestSentryHiveAuthorizationTaskFactory {
   private static final String GROUP = "group1";
   private static final String ROLE = "role1";
   private static final String USER = "user1";
+  private static final String SERVER = "server1";
+
 
   private ParseDriver parseDriver;
   private DDLSemanticAnalyzer analyzer;
@@ -69,12 +78,18 @@ public class TestSentryHiveAuthorizationTaskFactory {
   private Hive db;
   private Table table;
   private Partition partition;
+  private File baseDir;
 
   @Before
   public void setup() throws Exception {
     conf = new HiveConf();
+    baseDir = Files.createTempDir();
+    baseDir.setWritable(true, false);
+    conf.setVar(HiveConf.ConfVars.SCRATCHDIR, baseDir.getAbsolutePath());
+    SessionState.start(conf);
     conf.setVar(ConfVars.HIVE_AUTHORIZATION_TASK_FACTORY,
         SentryHiveAuthorizationTaskFactoryImpl.class.getName());
+
     db = Mockito.mock(Hive.class);
     table = new Table(DB, TABLE);
     partition = new Partition(table);
@@ -381,6 +396,47 @@ public class TestSentryHiveAuthorizationTaskFactory {
     Assert.assertEquals(RoleOperation.SHOW_CURRENT_ROLE, roleDDLDesc.getOperation());
   }
 
+  @Test
+  public void testGrantUri() throws Exception {
+    String uriPath = "/tmp";
+    DDLWork work = analyze(parse("GRANT " + ALL + " ON URI '" + uriPath
+        + "' TO ROLE " + ROLE));
+    GrantDesc grantDesc = work.getGrantDesc();
+    Assert.assertNotNull("Grant should not be null", grantDesc);
+    for (PrincipalDesc principal : assertSize(1, grantDesc.getPrincipals())) {
+      Assert.assertEquals(PrincipalType.ROLE, principal.getType());
+      Assert.assertEquals(ROLE, principal.getName());
+    }
+    for (PrivilegeDesc privilege : assertSize(1, grantDesc.getPrivileges())) {
+      Assert.assertEquals(Privilege.ALL, privilege.getPrivilege());
+    }
+    SentryHivePrivilegeObjectDesc privilegeDesc = (SentryHivePrivilegeObjectDesc)grantDesc.getPrivilegeSubjectDesc();
+    Assert.assertTrue("Expected uri", privilegeDesc.getUri());
+    Assert.assertEquals(uriPath, privilegeDesc.getObject());
+  }
+
+  /**
+   * GRANT ALL ON SERVER
+   */
+  @Test
+  public void testGrantServer() throws Exception {
+    DDLWork work = analyze(parse("GRANT " + ALL + " ON SERVER " + SERVER
+        + " TO ROLE " + ROLE));
+    GrantDesc grantDesc = work.getGrantDesc();
+    Assert.assertNotNull("Grant should not be null", grantDesc);
+    for (PrincipalDesc principal : assertSize(1, grantDesc.getPrincipals())) {
+      Assert.assertEquals(PrincipalType.ROLE, principal.getType());
+      Assert.assertEquals(ROLE, principal.getName());
+    }
+    for (PrivilegeDesc privilege : assertSize(1, grantDesc.getPrivileges())) {
+      Assert.assertEquals(Privilege.ALL, privilege.getPrivilege());
+    }
+    SentryHivePrivilegeObjectDesc privilegeDesc =
+        (SentryHivePrivilegeObjectDesc)grantDesc.getPrivilegeSubjectDesc();
+    Assert.assertTrue("Expected server", privilegeDesc.getServer());
+    Assert.assertEquals(SERVER, privilegeDesc.getObject());
+  }
+
   private void expectSemanticException(String command, String msg) throws Exception {
     try {
       analyze(parse(command));
@@ -403,5 +459,12 @@ public class TestSentryHiveAuthorizationTaskFactory {
   private static <L extends List<?>> L assertSize(int size, L list) {
     Assert.assertEquals(list.toString(), size, list.size());
     return list;
+  }
+
+  @After
+  public void clear() {
+    if(baseDir != null) {
+      FileUtils.deleteQuietly(baseDir);
+    }
   }
 }

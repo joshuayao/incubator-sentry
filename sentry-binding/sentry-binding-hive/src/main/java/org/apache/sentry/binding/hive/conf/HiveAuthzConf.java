@@ -16,17 +16,16 @@
  */
 package org.apache.sentry.binding.hive.conf;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hive.conf.HiveConf;
-import org.mortbay.log.Log;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Map.Entry;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 public class HiveAuthzConf extends Configuration {
@@ -39,14 +38,18 @@ public class HiveAuthzConf extends Configuration {
   public static final String HIVE_ACCESS_SUBJECT_NAME = "hive.access.subject.name";
   public static final String HIVE_SENTRY_SUBJECT_NAME = "hive.sentry.subject.name";
   public static final String HIVE_SENTRY_AUTH_ERRORS = "sentry.hive.authorization.errors";
-  public static final String HIVE_SENTRY_MOCK_COMPILATION = "hive.sentry.mock.compilation";
-  public static final String HIVE_SENTRY_MOCK_ERROR = "hive.sentry.mock.error";
+  public static final String HIVE_SENTRY_MOCK_COMPILATION = "sentry.hive.mock.compilation";
+  public static final String HIVE_SENTRY_MOCK_ERROR = "sentry.hive.mock.error";
   public static final String HIVE_SENTRY_PRIVILEGE_ERROR_MESSAGE = "No valid privileges";
   /**
    * Property used to persist the role set in the session. This is not public for now.
    */
   public static final String SENTRY_ACTIVE_ROLE_SET = "hive.sentry.active.role.set";
 
+  public static final String HIVE_SENTRY_SECURITY_COMMAND_WHITELIST =
+      "hive.sentry.security.command.whitelist";
+  public static final String HIVE_SENTRY_SECURITY_COMMAND_WHITELIST_DEFAULT =
+      "set,reset,reload";
 
   /**
    * Config setting definitions
@@ -57,6 +60,9 @@ public class HiveAuthzConf extends Configuration {
     AUTHZ_PROVIDER_RESOURCE("sentry.hive.provider.resource", ""),
     AUTHZ_PROVIDER_BACKEND("sentry.hive.provider.backend", "org.apache.sentry.provider.file.SimpleFileProviderBackend"),
     AUTHZ_POLICY_ENGINE("sentry.hive.policy.engine", "org.apache.sentry.policy.db.SimpleDBPolicyEngine"),
+    AUTHZ_POLICY_FILE_FORMATTER(
+        "sentry.hive.policy.file.formatter",
+        "org.apache.sentry.binding.hive.SentryIniPolicyFileFormatter"),
     AUTHZ_SERVER_NAME("sentry.hive.server", "HS2"),
     AUTHZ_RESTRICT_DEFAULT_DB("sentry.hive.restrict.defaultDB", "false"),
     SENTRY_TESTING_MODE("sentry.hive.testing.mode", "false"),
@@ -107,7 +113,7 @@ public class HiveAuthzConf extends Configuration {
   private static final String HIVE_UDF_WHITE_LIST =
     "date,decimal,timestamp," + // SENTRY-312
     "abs,acos,and,array,array_contains,ascii,asin,assert_true,atan,avg," +
-    "between,bin,case,cast,ceil,ceiling,coalesce,collect_set,compute_stats,concat,concat_ws," +
+    "between,bin,case,cast,ceil,ceiling,coalesce,collect_list,collect_set,compute_stats,concat,concat_ws," +
     "UDFConv,UDFHex,UDFSign,UDFToBoolean,UDFToByte,UDFToDouble,UDFToFloat,UDFToInteger,UDFToLong,UDFToShort,UDFToString," +
     "context_ngrams,conv,corr,cos,count,covar_pop,covar_samp,create_union,date_add,date_sub," +
     "datediff,day,dayofmonth,degrees,div,e,elt,ewah_bitmap,ewah_bitmap_and,ewah_bitmap_empty," +
@@ -117,7 +123,7 @@ public class HiveAuthzConf extends Configuration {
     "json_tuple,lcase,length,like,ln,locate,log," +
     "log10,log2,lower,lpad,ltrim,map,map_keys,map_values,max,min," +
     "minute,month,named_struct,negative,ngrams,not,or,parse_url,parse_url_tuple,percentile," +
-    "percentile_approx,pi,pmod,positive,pow,power,printf,radians,rand," + // reflect is skipped
+    "percentile_approx,pi,pmod,posexplode,positive,pow,power,printf,radians,rand," + // reflect is skipped
     "regexp,regexp_extract,regexp_replace,repeat,reverse,rlike,round,rpad,rtrim,second," +
     "sentences,sign,sin,size,sort_array,space,split,sqrt,stack,std," +
     "stddev,stddev_pop,stddev_samp,str_to_map,struct,substr,substring,sum,tan,to_date," +
@@ -125,8 +131,7 @@ public class HiveAuthzConf extends Configuration {
     "variance,weekofyear,when,xpath,xpath_boolean,xpath_double,xpath_float,xpath_int,xpath_long," +
     "xpath_number,xpath_short,xpath_string,year,base64,cume_dist, decode, dense_rank, first_value," +
     "lag, last_value, lead, noop, noopwithmap, ntile, nvl, percent_rank, rank, to_unix_timestamp," +
-    "current_database, char, varchar, matchpath, row_number" +
-    "unbase64,windowingtablefunction";
+    "current_database,char,varchar,matchpath,row_number,unbase64,windowingtablefunction";
 
   // map of current property names - > deprecated property names.
   // The binding layer code should work if the deprecated property names are provided,
@@ -203,7 +208,7 @@ public class HiveAuthzConf extends Configuration {
       if (retVal == null) {
         retVal = AuthzConfVars.getDefault(varName);
       } else {
-        Log.warn("Using the deprecated config setting " + currentToDeprecatedProps.get(varName).getVar() +
+        LOG.warn("Using the deprecated config setting " + currentToDeprecatedProps.get(varName).getVar() +
             " instead of " + varName);
       }
     }

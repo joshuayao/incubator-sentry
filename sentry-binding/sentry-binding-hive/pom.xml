@@ -22,21 +22,13 @@ limitations under the License.
   <parent>
     <groupId>org.apache.sentry</groupId>
     <artifactId>sentry-binding</artifactId>
-    <version>1.5.0-incubating-SNAPSHOT</version>
+    <version>1.7.0-incubating-SNAPSHOT</version>
   </parent>
 
   <artifactId>sentry-binding-hive</artifactId>
   <name>Sentry Binding for Hive</name>
 
   <dependencies>
-    <dependency>
-      <groupId>org.apache.thrift</groupId>
-      <artifactId>libthrift</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.derby</groupId>
-      <artifactId>derby</artifactId>
-    </dependency>
     <dependency>
       <groupId>org.apache.thrift</groupId>
       <artifactId>libthrift</artifactId>

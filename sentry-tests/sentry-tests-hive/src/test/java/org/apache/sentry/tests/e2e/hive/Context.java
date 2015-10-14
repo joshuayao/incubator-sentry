@@ -173,13 +173,15 @@ public class Context {
     }
   }
 
-  public void assertAuthzExecHookException(Statement statement, String query)
-      throws SQLException {
+  public void assertAuthzExecHookException(Statement statement, String query,
+      String expectedMsg) throws SQLException {
     try {
       statement.execute(query);
       Assert.fail("Expected SQLException for '" + query + "'");
     } catch (SQLException e) {
       verifyAuthzExecHookException(e);
+      assertNotNull(e.getMessage());
+      assertTrue(e.getMessage().contains(expectedMsg));
     }
   }
 
@@ -256,8 +258,8 @@ public class Context {
   // TODO: Handle kerberos login
   public HiveMetaStoreClient getMetaStoreClient(String userName) throws Exception {
     UserGroupInformation clientUgi = UserGroupInformation.createRemoteUser(userName);
-    HiveMetaStoreClient client = (HiveMetaStoreClient)ShimLoader.getHadoopShims()
-        .doAs(clientUgi, new PrivilegedExceptionAction<Object> () {
+    HiveMetaStoreClient client = (HiveMetaStoreClient) clientUgi.
+        doAs(new PrivilegedExceptionAction<Object> () {
           @Override
           public HiveMetaStoreClient run() throws Exception {
             return new HiveMetaStoreClient(new HiveConf());
@@ -270,8 +272,8 @@ public class Context {
       throws Exception {
     UserGroupInformation clientUgi = UserGroupInformation
         .createRemoteUser(userName);
-    PigServer pigServer = (PigServer) ShimLoader.getHadoopShims().doAs(
-        clientUgi, new PrivilegedExceptionAction<Object>() {
+    PigServer pigServer = (PigServer) clientUgi.
+        doAs(new PrivilegedExceptionAction<Object>() {
       @Override
       public PigServer run() throws Exception {
         return new PigServer(exType, new HiveConf());
@@ -283,7 +285,7 @@ public class Context {
   /**
    * Execute "set x" and extract value from key=val format result Verify the
    * extracted value
-   * 
+   *
    * @param stmt
    * @return
    * @throws Exception

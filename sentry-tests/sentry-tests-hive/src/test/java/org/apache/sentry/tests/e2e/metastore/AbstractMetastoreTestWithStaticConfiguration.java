@@ -22,6 +22,7 @@ import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.hive.cli.CliSessionState;
 import org.apache.hadoop.hive.conf.HiveConf;
@@ -37,7 +38,6 @@ import org.apache.hadoop.hive.ql.Driver;
 import org.apache.hadoop.hive.ql.processors.CommandProcessorResponse;
 import org.apache.hadoop.hive.ql.session.SessionState;
 import org.apache.hadoop.hive.serde.serdeConstants;
-import org.apache.hadoop.hive.shims.ShimLoader;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.pig.PigServer;
 import org.apache.sentry.provider.file.PolicyFile;
@@ -46,24 +46,20 @@ import org.apache.sentry.tests.e2e.hive.hiveserver.HiveServerFactory.HiveServer2
 import org.junit.After;
 import org.junit.BeforeClass;
 
+import com.google.common.collect.Maps;
+
 public abstract class AbstractMetastoreTestWithStaticConfiguration extends
     AbstractTestWithStaticConfiguration {
 
   @BeforeClass
   public static void setupTestStaticConfiguration() throws Exception {
     useSentryService = true;
+    clearDbPerTest = false;
     testServerType = HiveServer2Type.InternalMetastore.name();
     AbstractTestWithStaticConfiguration.setupTestStaticConfiguration();
   }
 
-  @Override
-  @After
-  public void clearDB() throws Exception {
-
-  }
-
-  @Override
-  protected void writePolicyFile(PolicyFile policyFile) throws Exception {
+  protected static void writePolicyFile(PolicyFile policyFile) throws Exception {
     policyFile.write(context.getPolicyFile());
   }
 
@@ -154,7 +150,6 @@ public abstract class AbstractMetastoreTestWithStaticConfiguration extends
       List<String> ptnVals, Table tbl) {
     Partition part = makeMetastoreBasePartitionObject(dbName, tblName, ptnVals,
         tbl);
-    part.getSd().setLocation(null);
     return part;
   }
 
@@ -178,24 +173,42 @@ public abstract class AbstractMetastoreTestWithStaticConfiguration extends
     client.createDatabase(db);
   }
 
-  public void execHiveSQL(String sqlStmt, String userName) throws Exception {
-    HiveConf hiveConf = new HiveConf();
-    Driver driver = new Driver(hiveConf, userName);
-    SessionState.start(new CliSessionState(hiveConf));
-    CommandProcessorResponse cpr = driver.run(sqlStmt);
-    if (cpr.getResponseCode() != 0) {
-      throw new IOException("Failed to execute \"" + sqlStmt + "\". Driver returned "
-          + cpr.getResponseCode() + " Error: " + cpr.getErrorMessage());
+  public void execHiveSQLwithOverlay(final String sqlStmt,
+      final String userName, Map<String, String> overLay) throws Exception {
+    final HiveConf hiveConf = new HiveConf();
+    for (Map.Entry<String, String> entry : overLay.entrySet()) {
+      hiveConf.set(entry.getKey(), entry.getValue());
     }
-    driver.close();
-    SessionState.get().close();
+    UserGroupInformation clientUgi = UserGroupInformation
+        .createRemoteUser(userName);
+    clientUgi.doAs(new PrivilegedExceptionAction<Object>() {
+      @Override
+      public Void run() throws Exception {
+        Driver driver = new Driver(hiveConf, userName);
+        SessionState.start(new CliSessionState(hiveConf));
+        CommandProcessorResponse cpr = driver.run(sqlStmt);
+        if (cpr.getResponseCode() != 0) {
+          throw new IOException("Failed to execute \"" + sqlStmt
+              + "\". Driver returned " + cpr.getResponseCode() + " Error: "
+              + cpr.getErrorMessage());
+        }
+        driver.close();
+        SessionState.get().close();
+        return null;
+      }
+    });
+  }
+
+
+  public void execHiveSQL(String sqlStmt, String userName) throws Exception {
+    execHiveSQLwithOverlay(sqlStmt, userName, new HashMap<String, String>());
   }
 
   public void execPigLatin(String userName, final PigServer pigServer,
       final String pigLatin) throws Exception {
     UserGroupInformation clientUgi = UserGroupInformation
         .createRemoteUser(userName);
-    ShimLoader.getHadoopShims().doAs(clientUgi,
+    clientUgi.doAs(
         new PrivilegedExceptionAction<Object>() {
           @Override
           public Void run() throws Exception {

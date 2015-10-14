@@ -26,23 +26,34 @@ import java.sql.Statement;
 
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.google.common.io.Resources;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TestExportImportPrivileges extends AbstractTestWithStaticConfiguration {
+  private static final Logger LOGGER = LoggerFactory.
+          getLogger(TestExportImportPrivileges.class);
   private File dataFile;
   private PolicyFile policyFile;
 
+  @BeforeClass
+  public static void setupTestStaticConfiguration () throws Exception {
+    LOGGER.info("TestExportImportPrivileges setupTestStaticConfiguration");
+    AbstractTestWithStaticConfiguration.setupTestStaticConfiguration();
+  }
+
   @Before
   public void setup() throws Exception {
+    LOGGER.info("TestExportImportPrivileges setup");
+    policyFile = super.setupPolicy();
+    super.setup();
     dataFile = new File(dataDir, SINGLE_TYPE_DATA_FILE_NAME);
     FileOutputStream to = new FileOutputStream(dataFile);
     Resources.copy(Resources.getResource(SINGLE_TYPE_DATA_FILE_NAME), to);
     to.close();
-    policyFile = PolicyFile.setAdminOnServer1(ADMINGROUP);
-    policyFile.setUserGroupMapping(StaticUserGroup.getStaticMapping());
-    writePolicyFile(policyFile);
   }
 
   @Test
@@ -51,17 +62,16 @@ public class TestExportImportPrivileges extends AbstractTestWithStaticConfigurat
     Statement statement = null;
     String dumpDir = dfs.getBaseDir() + "/hive_data_dump";
 
-    policyFile
-        .addRolesToGroup(USERGROUP1, "db1_read", "db1_write", "data_dump")
-        .addRolesToGroup(USERGROUP2, "db1_read", "db1_write")
-        .addPermissionsToRole("db1_write", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=INSERT")
-        .addPermissionsToRole("db1_read", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=SELECT")
-        .addPermissionsToRole("data_dump", "server=server1->URI=" + dumpDir);
-    writePolicyFile(policyFile);
-
-    dropDb(ADMIN1, DB1);
     createDb(ADMIN1, DB1);
     createTable(ADMIN1, DB1, dataFile, TBL1);
+
+    policyFile
+            .addRolesToGroup(USERGROUP1, "db1_read", "db1_write", "data_dump")
+            .addRolesToGroup(USERGROUP2, "db1_read", "db1_write")
+            .addPermissionsToRole("db1_write", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=INSERT")
+            .addPermissionsToRole("db1_read", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=SELECT")
+            .addPermissionsToRole("data_dump", "server=server1->URI=" + dumpDir);
+    writePolicyFile(policyFile);
 
     // Negative test, user2 doesn't have access to write to dir
     connection = context.createConnection(USER2_1);
@@ -94,15 +104,16 @@ public class TestExportImportPrivileges extends AbstractTestWithStaticConfigurat
     Connection connection = null;
     Statement statement = null;
     String exportDir = dfs.getBaseDir() + "/hive_export1";
-    dropDb(ADMIN1, DB1);
     createDb(ADMIN1, DB1);
     createTable(ADMIN1, DB1, dataFile, TBL1);
 
     policyFile
         .addRolesToGroup(USERGROUP1, "tab1_read", "tab1_write", "db1_all", "data_read", "data_export")
         .addRolesToGroup(USERGROUP2, "tab1_write", "tab1_read")
+        .addRolesToGroup(USERGROUP3, "col1_read")
         .addPermissionsToRole("tab1_write", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=INSERT")
         .addPermissionsToRole("tab1_read", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->action=SELECT")
+        .addPermissionsToRole("col1_read", "server=server1->db=" + DB1 + "->table=" + TBL1 + "->column=under_col->action=SELECT")
         .addPermissionsToRole("db1_all", "server=server1->db=" + DB1)
         .addPermissionsToRole("data_read", "server=server1->URI=file://" + dataFile.getPath())
         .addPermissionsToRole("data_export", "server=server1->URI=" + exportDir);
@@ -137,6 +148,14 @@ public class TestExportImportPrivileges extends AbstractTestWithStaticConfigurat
     statement = context.createStatement(connection);
     statement.execute("use " + DB1);
     statement.execute("IMPORT TABLE " + TBL2 + " FROM '" + exportDir + "'");
+    statement.close();
+    connection.close();
+
+    // Positive test, user3 have access to the target directory
+    connection = context.createConnection(USER3_1);
+    statement = context.createStatement(connection);
+    statement.execute("use " + DB1);
+    statement.execute("SELECT under_col FROM " + TBL1);
     statement.close();
     connection.close();
   }

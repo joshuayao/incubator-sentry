@@ -37,10 +37,12 @@ import org.apache.sentry.binding.hive.conf.InvalidConfigurationException;
 import org.apache.sentry.core.common.Subject;
 import org.apache.sentry.core.model.db.AccessConstants;
 import org.apache.sentry.core.model.db.AccessURI;
+import org.apache.sentry.core.model.db.Column;
 import org.apache.sentry.core.model.db.DBModelAuthorizable;
 import org.apache.sentry.core.model.db.Database;
 import org.apache.sentry.core.model.db.Server;
 import org.apache.sentry.core.model.db.Table;
+import org.apache.sentry.provider.common.SentryGroupNotFoundException;
 import org.apache.sentry.provider.file.PolicyFiles;
 import org.junit.After;
 import org.junit.Before;
@@ -75,6 +77,10 @@ public class TestHiveAuthzBindings {
   private static final String PURCHASES_TAB = "purchases";
   private static final String PAYMENT_TAB = "payments";
 
+  // Columns
+  private static final String AGE_COL = "age";
+  private static final String NAME_COL = "name";
+
   // Entities
   private List<List<DBModelAuthorizable>> inputTabHierarcyList = new ArrayList<List<DBModelAuthorizable>>();
   private List<List<DBModelAuthorizable>> outputTabHierarcyList = new ArrayList<List<DBModelAuthorizable>>();
@@ -92,6 +98,8 @@ public class TestHiveAuthzBindings {
       HiveAuthzPrivilegesMap.getHiveAuthzPrivileges(HiveOperation.CREATEDATABASE);
   private static final HiveAuthzPrivileges createFuncPrivileges =
       HiveAuthzPrivilegesMap.getHiveAuthzPrivileges(HiveOperation.CREATEFUNCTION);
+  private static final HiveAuthzPrivileges alterTabPrivileges =
+      HiveAuthzPrivilegesMap.getHiveAuthzPrivileges(HiveOperation.ALTERTABLE_PROPERTIES);
 
   // auth bindings handler
   private HiveAuthzBinding testAuth = null;
@@ -156,7 +164,7 @@ public class TestHiveAuthzBindings {
    */
   @Test
   public void testValidateCreateTabPrivilegesForAdmin() throws Exception {
-    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, CUSTOMER_DB, null));
+    outputTabHierarcyList.add(buildObjectHierarchy(SERVER1, CUSTOMER_DB, null));
     testAuth.authorize(HiveOperation.CREATETABLE, createTabPrivileges, ADMIN_SUBJECT,
         inputTabHierarcyList, outputTabHierarcyList);
   }
@@ -166,7 +174,7 @@ public class TestHiveAuthzBindings {
    */
   @Test
   public void testValidateCreateTabPrivilegesForUser() throws Exception {
-    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, JUNIOR_ANALYST_DB, null));
+    outputTabHierarcyList.add(buildObjectHierarchy(SERVER1, JUNIOR_ANALYST_DB, null));
     testAuth.authorize(HiveOperation.CREATETABLE, createTabPrivileges, MANAGER_SUBJECT,
         inputTabHierarcyList, outputTabHierarcyList);
   }
@@ -189,6 +197,37 @@ public class TestHiveAuthzBindings {
     outputTabHierarcyList.add(buildObjectHierarchy(SERVER1, ANALYST_DB, null));
     testAuth.authorize(HiveOperation.CREATETABLE, createTabPrivileges, JUNIOR_ANALYST_SUBJECT,
         inputTabHierarcyList, outputTabHierarcyList);
+  }
+
+  /**
+   * Positive test case for MSCK REPAIR TABLE. User has privileges to execute the
+   * operation.
+   */
+  @Test
+  public void testMsckRepairTable() throws Exception {
+    outputTabHierarcyList.add(buildObjectHierarchy(SERVER1, JUNIOR_ANALYST_DB, PURCHASES_TAB));
+    testAuth.authorize(HiveOperation.MSCK, alterTabPrivileges, MANAGER_SUBJECT,
+      inputTabHierarcyList, outputTabHierarcyList);
+
+    // Should also succeed for the admin.
+    testAuth.authorize(HiveOperation.MSCK, alterTabPrivileges, ADMIN_SUBJECT,
+      inputTabHierarcyList, outputTabHierarcyList);
+
+    // Admin can also run this against tables in the ANALYST_DB.
+    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, ANALYST_DB, PURCHASES_TAB));
+    testAuth.authorize(HiveOperation.MSCK, alterTabPrivileges, ADMIN_SUBJECT,
+      inputTabHierarcyList, outputTabHierarcyList);
+  }
+
+  /**
+   * Negative case for MSCK REPAIR TABLE. User should not have privileges to execute
+   * the operation.
+   */
+  @Test(expected=AuthorizationException.class)
+  public void testMsckRepairTableRejection() throws Exception {
+	inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, JUNIOR_ANALYST_DB, PURCHASES_TAB));
+    testAuth.authorize(HiveOperation.MSCK, alterTabPrivileges,
+        JUNIOR_ANALYST_SUBJECT, inputTabHierarcyList, outputTabHierarcyList);
   }
 
   /**
@@ -246,7 +285,7 @@ public class TestHiveAuthzBindings {
    */
   @Test
   public void testValidateCreateFunctionForAdmin() throws Exception {
-    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, CUSTOMER_DB, PURCHASES_TAB));
+    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, CUSTOMER_DB, PURCHASES_TAB, AGE_COL));
     inputTabHierarcyList.add(Arrays.asList(new DBModelAuthorizable[] {
         new Server(SERVER1), new AccessURI("file:///some/path/to/a/jar")
     }));
@@ -256,17 +295,17 @@ public class TestHiveAuthzBindings {
   @Test
   public void testValidateCreateFunctionAppropiateURI() throws Exception {
     inputTabHierarcyList.add(Arrays.asList(new DBModelAuthorizable[] {
-        new Server(SERVER1), new Database(CUSTOMER_DB), new Table(AccessConstants.ALL)
-    }));
-    inputTabHierarcyList.add(Arrays.asList(new DBModelAuthorizable[] {
         new Server(SERVER1), new AccessURI("file:///path/to/some/lib/dir/my.jar")
     }));
     testAuth.authorize(HiveOperation.CREATEFUNCTION, createFuncPrivileges, ANALYST_SUBJECT,
         inputTabHierarcyList, outputTabHierarcyList);
   }
-  @Test(expected=AuthorizationException.class)
+
+  @Test(expected = SentryGroupNotFoundException.class)
   public void testValidateCreateFunctionRejectionForUnknownUser() throws Exception {
-    inputTabHierarcyList.add(buildObjectHierarchy(SERVER1, CUSTOMER_DB, AccessConstants.ALL));
+    inputTabHierarcyList.add(Arrays.asList(new DBModelAuthorizable[] {
+        new Server(SERVER1), new AccessURI("file:///path/to/some/lib/dir/my.jar")
+    }));
     testAuth.authorize(HiveOperation.CREATEFUNCTION, createFuncPrivileges, NO_SUCH_SUBJECT,
         inputTabHierarcyList, outputTabHierarcyList);
   }
@@ -360,6 +399,14 @@ public class TestHiveAuthzBindings {
       if (table != null) {
         authList.add(new Table(table));
       }
+    }
+    return authList;
+  }
+
+  private List <DBModelAuthorizable>  buildObjectHierarchy(String server, String db, String table, String column) {
+    List <DBModelAuthorizable> authList = buildObjectHierarchy(server, db, table);
+    if (server != null && db != null && table != null && column != null) {
+      authList.add(new Column(column));
     }
     return authList;
   }

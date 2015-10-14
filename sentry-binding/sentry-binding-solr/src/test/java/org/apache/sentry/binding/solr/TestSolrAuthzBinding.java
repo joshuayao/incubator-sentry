@@ -21,14 +21,21 @@ import static junit.framework.Assert.assertTrue;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import junit.framework.Assert;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.security.GroupMappingServiceProvider;
 import org.apache.sentry.binding.solr.authz.SentrySolrAuthorizationException;
 import org.apache.sentry.binding.solr.authz.SolrAuthzBinding;
 import org.apache.sentry.binding.solr.conf.SolrAuthzConf;
@@ -36,6 +43,7 @@ import org.apache.sentry.binding.solr.conf.SolrAuthzConf.AuthzConfVars;
 import org.apache.sentry.core.common.Subject;
 import org.apache.sentry.core.model.search.Collection;
 import org.apache.sentry.core.model.search.SearchModelAction;
+import org.apache.sentry.provider.common.SentryGroupNotFoundException;
 import org.apache.sentry.provider.file.PolicyFiles;
 import org.junit.After;
 import org.junit.Before;
@@ -174,14 +182,38 @@ public class TestSolrAuthzBinding {
     Set<String> emptyList = Collections.emptySet();
 
     // check non-existant users
-    assertEquals(binding.getGroups(null), emptyList);
-    assertEquals(binding.getGroups("nonExistantUser"), emptyList);
+    try {
+      binding.getGroups(null);
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getGroups("nonExistantUser");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
 
     // check group names don't map to user names
-    assertEquals(binding.getGroups("corporal"), emptyList);
-    assertEquals(binding.getGroups("sergeant"), emptyList);
-    assertEquals(binding.getGroups("general"), emptyList);
-    assertEquals(binding.getGroups("othergeneralgroup"), emptyList);
+    try {
+      binding.getGroups("corporal");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getGroups("sergeant");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getGroups("general");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getGroups("othergeneralgroup");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
 
     // check valid group names
     assertEquals(binding.getGroups("corporal1"), Sets.newHashSet("corporal"));
@@ -200,19 +232,27 @@ public class TestSolrAuthzBinding {
     SolrAuthzBinding binding = new SolrAuthzBinding(solrAuthzConf);
     Set<String> emptySet = Collections.emptySet();
 
-    // check non-existant users
-    assertEquals(binding.getRoles(null), emptySet);
-    assertEquals(binding.getRoles("nonExistantUser"), emptySet);
-
     // check user with undefined group
     assertEquals(binding.getRoles("undefinedGroupUser"), emptySet);
     // check group with undefined role
     assertEquals(binding.getRoles("undefinedRoleUser"), emptySet);
 
     // check role names don't map in the other direction
-    assertEquals(binding.getRoles("corporal_role"), emptySet);
-    assertEquals(binding.getRoles("sergeant_role"), emptySet);
-    assertEquals(binding.getRoles("general_role"), emptySet);
+    try {
+      binding.getRoles("corporal_role");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getRoles("sergeant_role");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
+    try {
+      binding.getRoles("general_role");
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
 
     // check valid users
     assertEquals(binding.getRoles("corporal1"), Sets.newHashSet("corporal_role"));
@@ -253,7 +293,11 @@ public class TestSolrAuthzBinding {
        new SolrAuthzConf(Resources.getResource("sentry-site.xml"));
      setUsableAuthzConf(solrAuthzConf);
      SolrAuthzBinding binding = new SolrAuthzBinding(solrAuthzConf);
-     expectAuthException(binding, new Subject("bogus"), infoCollection, querySet);
+    try {
+      binding.authorizeCollection(new Subject("bogus"), infoCollection, querySet);
+      Assert.fail("Expected SentryGroupNotFoundException");
+    } catch (SentryGroupNotFoundException e) {
+    }
   }
 
   /**
@@ -324,5 +368,66 @@ public class TestSolrAuthzBinding {
      binding.authorizeCollection(general1, generalInfoCollection, updateSet);
      binding.authorizeCollection(general1, generalInfoCollection, allSet);
      binding.authorizeCollection(general1, generalInfoCollection, allOfSet);
+  }
+
+  /**
+   * Test that when the resource is put on  HDFS and the scheme of the resource is not set,
+   * the resouce can be found if fs.defaultFS is specified
+   */
+  @Test
+  public void testResourceWithSchemeNotSet() throws Exception {
+    SolrAuthzConf solrAuthzConf =
+        new SolrAuthzConf(Resources.getResource("sentry-site.xml"));
+    setUsableAuthzConf(solrAuthzConf);
+
+    MiniDFSCluster dfsCluster =  HdfsTestUtil.setupClass(new File(Files.createTempDir(),
+      TestSolrAuthzBinding.class.getName() + "_"
+        + System.currentTimeMillis()).getAbsolutePath());
+    String resourceOnHDFS = "/hdfs" + File.separator + UUID.randomUUID() + File.separator + "test-authz-provider.ini";
+    try {
+      Path src = new Path(baseDir.getPath(), RESOURCE_PATH);
+      // Copy resource to HDFSS
+      dfsCluster.getFileSystem().copyFromLocalFile(false,
+          new Path(baseDir.getPath(), RESOURCE_PATH),
+          new Path(resourceOnHDFS));
+      solrAuthzConf.set(AuthzConfVars.AUTHZ_PROVIDER_RESOURCE.getVar(), resourceOnHDFS);
+      // set HDFS as the defaultFS so the resource will be found
+      solrAuthzConf.set("fs.defaultFS", dfsCluster.getFileSystem().getConf().get("fs.defaultFS"));
+      new SolrAuthzBinding(solrAuthzConf);
+    } finally {
+      if (dfsCluster != null) {
+        HdfsTestUtil.teardownClass(dfsCluster);
+      }
+    }
+  }
+
+  @Test
+  public void testCustomGroupMapping() throws Exception {
+    SolrAuthzConf solrAuthzConf =
+      new SolrAuthzConf(Resources.getResource("sentry-site.xml"));
+    setUsableAuthzConf(solrAuthzConf);
+    solrAuthzConf.set(AuthzConfVars.AUTHZ_PROVIDER.getVar(), "org.apache.sentry.provider.common.HadoopGroupResourceAuthorizationProvider");
+    solrAuthzConf.set("hadoop.security.group.mapping",
+      FoobarGroupMappingServiceProvider.class.getName());
+    SolrAuthzBinding binding = new SolrAuthzBinding(solrAuthzConf);
+    final String user = "userTestSolrAuthzBinding";
+    assertEquals(1, binding.getGroups(user).size());
+    assertTrue(binding.getGroups(user).contains("foobar"));
+  }
+
+  /**
+   * GroupMappingServiceProvider that returns "foobar" for any group
+   */
+  private static class FoobarGroupMappingServiceProvider implements GroupMappingServiceProvider {
+    @Override
+    public List<String> getGroups(String user) throws IOException {
+      return Arrays.asList("foobar");
+    }
+
+    @Override
+    public void cacheGroupsRefresh() throws IOException {}
+
+    @Override
+    public void cacheGroupsAdd(List<String> groups) throws IOException {}
   }
 }

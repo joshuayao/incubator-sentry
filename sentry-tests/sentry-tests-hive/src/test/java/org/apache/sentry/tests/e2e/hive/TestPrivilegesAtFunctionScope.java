@@ -18,11 +18,13 @@ printf_test_3 * Licensed to the Apache Software Foundation (ASF) under one or mo
 package org.apache.sentry.tests.e2e.hive;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.security.CodeSource;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
@@ -32,7 +34,13 @@ import org.junit.Test;
 
 import com.google.common.io.Resources;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class TestPrivilegesAtFunctionScope extends AbstractTestWithStaticConfiguration {
+  private static final Logger LOGGER = LoggerFactory
+          .getLogger(TestPrivilegesAtFunctionScope.class);
+
   private final String SINGLE_TYPE_DATA_FILE_NAME = "kv1.dat";
   private File dataDir;
   private File dataFile;
@@ -85,18 +93,27 @@ public class TestPrivilegesAtFunctionScope extends AbstractTestWithStaticConfigu
         .addPermissionsToRole("db1_all", "server=server1->db=" + DB1)
         .addPermissionsToRole("db1_tab1", "server=server1->db=" + DB1 + "->table=" + tableName1)
         .addPermissionsToRole("UDF_JAR", "server=server1->uri=file://" + udfLocation)
-        .addPermissionsToRole("data_read", "server=server1->URI=" 
-            + fileSystem.getDefaultUri(fileSystem.getConf()) + "/tmp");
+        .addPermissionsToRole("data_read", "server=server1->URI=" + "file:///tmp");
     writePolicyFile(policyFile);
 
     // user1 should be able create/drop temp functions
     connection = context.createConnection(USER1_1);
     statement = context.createStatement(connection);
     statement.execute("USE " + DB1);
-    statement.execute(
-        "CREATE TEMPORARY FUNCTION printf_test AS 'org.apache.hadoop.hive.ql.udf.generic.GenericUDFPrintf'");
-    statement.execute("SELECT printf_test(value) FROM " + tableName1);
-    statement.execute("DROP TEMPORARY FUNCTION printf_test");
+
+    try {
+      statement.execute("CREATE TEMPORARY FUNCTION printf_test AS 'org.apache.hadoop.hive.ql.udf.generic.GenericUDFPrintf'");
+      LOGGER.info("Testing select from temp func printf_test");
+      ResultSet res = statement.executeQuery("SELECT printf_test('%d', under_col) FROM " + tableName1);
+      while (res.next()) {
+        LOGGER.info(res.getString(1));
+      }
+      res.close();
+      statement.execute("DROP TEMPORARY FUNCTION printf_test");
+    } catch (Exception ex) {
+      LOGGER.error("test temp func printf_test failed with reason: " + ex.getStackTrace() + " " + ex.getMessage());
+      fail("fail to test temp func printf_test");
+    }
 
     statement.execute(
         "CREATE FUNCTION printf_test_perm AS 'org.apache.hadoop.hive.ql.udf.generic.GenericUDFPrintf' ");
@@ -106,7 +123,7 @@ public class TestPrivilegesAtFunctionScope extends AbstractTestWithStaticConfigu
     // test perm UDF with 'using file' syntax
     statement
         .execute("CREATE FUNCTION printf_test_perm AS 'org.apache.hadoop.hive.ql.udf.generic.GenericUDFPrintf' "
-            + " using file '" + fileSystem.getDefaultUri(fileSystem.getConf()) + "/tmp" + "'");
+            + " using file 'file:///tmp'");
     statement.execute("DROP FUNCTION printf_test_perm");
 
     context.close();
@@ -125,7 +142,6 @@ public class TestPrivilegesAtFunctionScope extends AbstractTestWithStaticConfigu
     statement.execute("SELECT printf_test_2_perm(value) FROM " + tableName1);
     statement.execute("DROP FUNCTION printf_test_2_perm");
 
-    /*** Disabled till HIVE-8266 is addressed
     // USER2 doesn't have URI perm on dataFile
     try {
       statement
@@ -137,7 +153,6 @@ public class TestPrivilegesAtFunctionScope extends AbstractTestWithStaticConfigu
     } catch (SQLException e) {
       context.verifyAuthzException(e);
     }
-    ***/
 
     context.close();
 

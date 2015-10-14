@@ -31,6 +31,9 @@ import java.util.Set;
 import org.apache.hadoop.hive.common.JavaUtils;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
+import org.apache.hadoop.hive.metastore.api.FieldSchema;
+import org.apache.hadoop.hive.ql.exec.DDLTask;
+import org.apache.hadoop.hive.ql.exec.SentryFilterDDLTask;
 import org.apache.hadoop.hive.ql.exec.SentryGrantRevokeTask;
 import org.apache.hadoop.hive.ql.exec.Task;
 import org.apache.hadoop.hive.ql.hooks.Entity;
@@ -45,6 +48,7 @@ import org.apache.hadoop.hive.ql.parse.BaseSemanticAnalyzer;
 import org.apache.hadoop.hive.ql.parse.HiveParser;
 import org.apache.hadoop.hive.ql.parse.HiveSemanticAnalyzerHookContext;
 import org.apache.hadoop.hive.ql.parse.SemanticException;
+import org.apache.hadoop.hive.ql.plan.DDLWork;
 import org.apache.hadoop.hive.ql.plan.HiveOperation;
 import org.apache.hadoop.hive.ql.session.SessionState;
 import org.apache.sentry.binding.hive.authz.HiveAuthzBinding;
@@ -56,6 +60,7 @@ import org.apache.sentry.binding.hive.conf.HiveAuthzConf;
 import org.apache.sentry.core.common.Subject;
 import org.apache.sentry.core.common.utils.PathUtils;
 import org.apache.sentry.core.model.db.AccessURI;
+import org.apache.sentry.core.model.db.Column;
 import org.apache.sentry.core.model.db.DBModelAction;
 import org.apache.sentry.core.model.db.DBModelAuthorizable;
 import org.apache.sentry.core.model.db.DBModelAuthorizable.AuthorizableType;
@@ -65,6 +70,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 
@@ -77,6 +83,15 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
   private Table currTab;
   private AccessURI udfURI;
   private AccessURI partitionURI;
+  private Table currOutTab = null;
+  private Database currOutDB = null;
+
+  // True if this is a basic DESCRIBE <table> operation. False for other DESCRIBE variants
+  // like DESCRIBE [FORMATTED|EXTENDED]. Required because Hive treats these stmts as the same
+  // HiveOperationType, but we want to enforces different privileges on each statement.
+  // Basic DESCRIBE <table> is allowed with only column-level privs, while the variants
+  // require table-level privileges.
+  public boolean isDescTableBasic = false;
 
   public HiveAuthzBindingHook() throws Exception {
     SessionState session = SessionState.get();
@@ -159,6 +174,8 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       case HiveParser.TOK_ALTERVIEW_RENAME:
       case HiveParser.TOK_CREATEINDEX:
       case HiveParser.TOK_DROPINDEX:
+      case HiveParser.TOK_LOCKTABLE:
+      case HiveParser.TOK_UNLOCKTABLE:
         currTab = extractTable((ASTNode)ast.getFirstChildWithType(HiveParser.TOK_TABNAME));
         currDB = extractDatabase((ASTNode) ast.getChild(0));
         break;
@@ -193,6 +210,13 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
         //token name TOK_TABNAME is not properly set in this case
         currTab = extractTable((ASTNode)ast.getChild(0));
         currDB = extractDatabase((ASTNode)ast.getChild(0));
+        break;
+      case HiveParser.TOK_MSCK:
+        // token name TOK_TABNAME is not properly set in this case and child(0) does
+        // not contain the table name.
+        // TODO: Fix Hive to capture the table and DB name
+        currOutTab = extractTable((ASTNode)ast.getChild(1));
+        currOutDB  = extractDatabase((ASTNode)ast.getChild(0));
         break;
       case HiveParser.TOK_ALTERTABLE_ADDPARTS:
         /*
@@ -230,6 +254,12 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       case HiveParser.TOK_LOAD:
         String dbName = BaseSemanticAnalyzer.unescapeIdentifier(ast.getChild(1).getChild(0).getChild(0).getText());
         currDB = new Database(dbName);
+        break;
+      case HiveParser.TOK_DESCTABLE:
+        currDB = getCanonicalDb();
+        // For DESCRIBE FORMATTED/EXTENDED ast will have an additional child node with value
+        // "FORMATTED/EXTENDED".
+        isDescTableBasic = (ast.getChildCount() == 1);
         break;
       default:
         currDB = getCanonicalDb();
@@ -284,7 +314,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
     try {
       HiveConf conf = SessionState.get().getConf();
       String warehouseDir = conf.getVar(ConfVars.METASTOREWAREHOUSE);
-      return new AccessURI(PathUtils.parseDFSURI(warehouseDir, uri, isLocal));
+      return new AccessURI(PathUtils.parseURI(warehouseDir, uri, isLocal));
     } catch (Exception e) {
       throw new SemanticException("Error parsing URI " + uri + ": " +
         e.getMessage(), e);
@@ -318,11 +348,27 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       }
     }
 
-    if (stmtAuthObject == null) {
-      // We don't handle authorizing this statement
-      return;
-    }
     try {
+      if (stmtAuthObject == null) {
+        // We don't handle authorizing this statement
+        return;
+      }
+
+      /**
+       * Replace DDLTask using the SentryFilterDDLTask for protection,
+       * such as "show column" only allow show some column that user can access to.
+       * SENTRY-847
+       */
+      for (int i = 0; i < rootTasks.size(); i++) {
+        Task<? extends Serializable> task = rootTasks.get(i);
+        if (task instanceof DDLTask) {
+          SentryFilterDDLTask filterTask =
+              new SentryFilterDDLTask(hiveAuthzBinding, subject, stmtOperation);
+          filterTask.setWork((DDLWork)task.getWork());
+          rootTasks.set(i, filterTask);
+        }
+      }
+
       authorizeWithHiveBindings(context, stmtAuthObject, stmtOperation);
     } catch (AuthorizationException e) {
       executeOnFailureHooks(context, stmtOperation, e);
@@ -331,23 +377,30 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
         permsRequired += perm + ";";
       }
       SessionState.get().getConf().set(HiveAuthzConf.HIVE_SENTRY_AUTH_ERRORS, permsRequired);
-      String msg = HiveAuthzConf.HIVE_SENTRY_PRIVILEGE_ERROR_MESSAGE + "\n Required privileges for this query: "
+      String msgForLog = HiveAuthzConf.HIVE_SENTRY_PRIVILEGE_ERROR_MESSAGE
+          + "\n Required privileges for this query: "
           + permsRequired;
-      throw new SemanticException(msg, e);
+      String msgForConsole = HiveAuthzConf.HIVE_SENTRY_PRIVILEGE_ERROR_MESSAGE + "\n "
+          + e.getMessage();
+      // AuthorizationException is not a real exception, use the info level to record this.
+      LOG.info(msgForLog);
+      throw new SemanticException(msgForConsole, e);
+    } finally {
+      hiveAuthzBinding.close();
     }
+
     if ("true".equalsIgnoreCase(context.getConf().
         get(HiveAuthzConf.HIVE_SENTRY_MOCK_COMPILATION))) {
       throw new SemanticException(HiveAuthzConf.HIVE_SENTRY_MOCK_ERROR + " Mock query compilation aborted. Set " +
           HiveAuthzConf.HIVE_SENTRY_MOCK_COMPILATION + " to 'false' for normal query processing");
     }
-    hiveAuthzBinding.set(context.getConf());
   }
 
   private void executeOnFailureHooks(HiveSemanticAnalyzerHookContext context,
       HiveOperation hiveOp, AuthorizationException e) {
     SentryOnFailureHookContext hookCtx = new SentryOnFailureHookContextImpl(
         context.getCommand(), context.getInputs(), context.getOutputs(),
-        hiveOp, currDB, currTab, udfURI, partitionURI, context.getUserName(),
+        hiveOp, currDB, currTab, udfURI, null, context.getUserName(),
         context.getIpAddress(), e, context.getConf());
     String csHooks = authzConf.get(
         HiveAuthzConf.AuthzConfVars.AUTHZ_ONFAILURE_HOOKS.getVar(), "").trim();
@@ -395,6 +448,14 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       LOG.debug("context.getOutputs() = " + context.getOutputs());
     }
 
+    // Workaround to allow DESCRIBE <table> to be executed with only column-level privileges, while
+    // still authorizing DESCRIBE [EXTENDED|FORMATTED] as table-level.
+    // This is done by treating DESCRIBE <table> the same as SHOW COLUMNS, which only requires column
+    // level privs.
+    if (isDescTableBasic) {
+      stmtAuthObject = HiveAuthzPrivilegesMap.getHiveAuthzPrivileges(HiveOperation.SHOWCOLUMNS);
+    }
+
     switch (stmtAuthObject.getOperationScope()) {
 
     case SERVER :
@@ -411,24 +472,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       inputHierarchy.add(dbHierarchy);
       outputHierarchy.add(dbHierarchy);
 
-      for(ReadEntity readEntity:inputs) {
-        // skip the tables/view that are part of expanded view definition.
-        if (isChildTabForView(readEntity)) {
-          continue;
-        }
-        // If this is a UDF, then check whether its allowed to be executed
-         // TODO: when we support execute privileges on UDF, this can be removed.
-        if (isUDF(readEntity)) {
-          if (isBuiltinUDF(readEntity)) {
-            checkUDFWhiteList(readEntity.getUDF().getDisplayName());
-          }
-          continue;
-        }
-        List<DBModelAuthorizable> entityHierarchy = new ArrayList<DBModelAuthorizable>();
-        entityHierarchy.add(hiveAuthzBinding.getAuthServer());
-        entityHierarchy.addAll(getAuthzHierarchyFromEntity(readEntity));
-        inputHierarchy.add(entityHierarchy);
-      }
+      getInputHierarchyFromInputs(inputHierarchy, inputs);
       break;
     case TABLE:
       // workaround for add partitions
@@ -436,24 +480,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
         inputHierarchy.add(ImmutableList.of(hiveAuthzBinding.getAuthServer(), partitionURI));
       }
 
-      for (ReadEntity readEntity: inputs) {
-        // skip the tables/view that are part of expanded view definition.
-        if (isChildTabForView(readEntity)) {
-          continue;
-        }
-        // If this is a UDF, then check whether its allowed to be executed
-        // TODO: when we support execute privileges on UDF, this can be removed.
-        if (isUDF(readEntity)) {
-          if (isBuiltinUDF(readEntity)) {
-            checkUDFWhiteList(readEntity.getUDF().getDisplayName());
-          }
-          continue;
-        }
-        List<DBModelAuthorizable> entityHierarchy = new ArrayList<DBModelAuthorizable>();
-        entityHierarchy.add(hiveAuthzBinding.getAuthServer());
-        entityHierarchy.addAll(getAuthzHierarchyFromEntity(readEntity));
-        inputHierarchy.add(entityHierarchy);
-      }
+      getInputHierarchyFromInputs(inputHierarchy, inputs);
       for (WriteEntity writeEntity: outputs) {
         if (filterWriteEntity(writeEntity)) {
           continue;
@@ -464,7 +491,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
         outputHierarchy.add(entityHierarchy);
       }
       // workaround for metadata queries.
-      // Capture the table name in pre-analyze and include that in the entity list
+      // Capture the table name in pre-analyze and include that in the input entity list
       if (currTab != null) {
         List<DBModelAuthorizable> externalAuthorizableHierarchy = new ArrayList<DBModelAuthorizable>();
         externalAuthorizableHierarchy.add(hiveAuthzBinding.getAuthServer());
@@ -472,33 +499,24 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
         externalAuthorizableHierarchy.add(currTab);
         inputHierarchy.add(externalAuthorizableHierarchy);
       }
-      break;
-    case CONNECT:
-      /* The 'CONNECT' is an implicit privilege scope currently used for
-       *  - CREATE TEMP FUNCTION
-       *  - DROP TEMP FUNCTION
-       *  - USE <db>
-       *  It's allowed when the user has any privilege on the current database. For application
-       *  backward compatibility, we allow (optional) implicit connect permission on 'default' db.
-       */
-      List<DBModelAuthorizable> connectHierarchy = new ArrayList<DBModelAuthorizable>();
-      connectHierarchy.add(hiveAuthzBinding.getAuthServer());
-      // by default allow connect access to default db
-      Table currTbl = Table.ALL;
-      if ((DEFAULT_DATABASE_NAME.equalsIgnoreCase(currDB.getName()) &&
-          "false".equalsIgnoreCase(authzConf.
-              get(HiveAuthzConf.AuthzConfVars.AUTHZ_RESTRICT_DEFAULT_DB.getVar(), "false")))
-              ||stmtOperation.equals(HiveOperation.CREATEFUNCTION)
-              ||stmtOperation.equals(HiveOperation.DROPFUNCTION)) {
-        currDB = Database.ALL;
-        currTbl = Table.SOME;
+
+
+
+      // workaround for DDL statements
+      // Capture the table name in pre-analyze and include that in the output entity list
+      if (currOutTab != null) {
+        List<DBModelAuthorizable> externalAuthorizableHierarchy = new ArrayList<DBModelAuthorizable>();
+        externalAuthorizableHierarchy.add(hiveAuthzBinding.getAuthServer());
+        externalAuthorizableHierarchy.add(currOutDB);
+        externalAuthorizableHierarchy.add(currOutTab);
+        outputHierarchy.add(externalAuthorizableHierarchy);
       }
-
-      connectHierarchy.add(currDB);
-      connectHierarchy.add(currTbl);
-
-      inputHierarchy.add(connectHierarchy);
-      // check if this is a create temp function and we need to validate URI
+      break;
+    case FUNCTION:
+      /* The 'FUNCTION' privilege scope currently used for
+       *  - CREATE TEMP FUNCTION
+       *  - DROP TEMP FUNCTION.
+       */
       if (udfURI != null) {
         List<DBModelAuthorizable> udfUriHierarchy = new ArrayList<DBModelAuthorizable>();
         udfUriHierarchy.add(hiveAuthzBinding.getAuthServer());
@@ -511,10 +529,45 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
           outputHierarchy.add(entityHierarchy);
         }
       }
+      break;
+    case CONNECT:
+      /* The 'CONNECT' is an implicit privilege scope currently used for
+       *  - USE <db>
+       *  It's allowed when the user has any privilege on the current database. For application
+       *  backward compatibility, we allow (optional) implicit connect permission on 'default' db.
+       */
+      List<DBModelAuthorizable> connectHierarchy = new ArrayList<DBModelAuthorizable>();
+      connectHierarchy.add(hiveAuthzBinding.getAuthServer());
+      // by default allow connect access to default db
+      Table currTbl = Table.ALL;
+      Column currCol = Column.ALL;
+      if ((DEFAULT_DATABASE_NAME.equalsIgnoreCase(currDB.getName()) &&
+          "false".equalsIgnoreCase(authzConf.
+              get(HiveAuthzConf.AuthzConfVars.AUTHZ_RESTRICT_DEFAULT_DB.getVar(), "false")))) {
+        currDB = Database.ALL;
+        currTbl = Table.SOME;
+      }
 
+      connectHierarchy.add(currDB);
+      connectHierarchy.add(currTbl);
+      connectHierarchy.add(currCol);
+
+      inputHierarchy.add(connectHierarchy);
       outputHierarchy.add(connectHierarchy);
       break;
-
+    case COLUMN:
+      for (ReadEntity readEntity: inputs) {
+        if (readEntity.getAccessedColumns() != null && !readEntity.getAccessedColumns().isEmpty()) {
+          addColumnHierarchy(inputHierarchy, readEntity);
+        } else {
+          List<DBModelAuthorizable> entityHierarchy = new ArrayList<DBModelAuthorizable>();
+          entityHierarchy.add(hiveAuthzBinding.getAuthServer());
+          entityHierarchy.addAll(getAuthzHierarchyFromEntity(readEntity));
+          entityHierarchy.add(Column.ALL);
+          inputHierarchy.add(entityHierarchy);
+        }
+      }
+      break;
     default:
       throw new AuthorizationException("Unknown operation scope type " +
           stmtAuthObject.getOperationScope().toString());
@@ -523,31 +576,6 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
     // validate permission
     hiveAuthzBinding.authorize(stmtOperation, stmtAuthObject, getCurrentSubject(context),
         inputHierarchy, outputHierarchy);
-
-    hiveAuthzBinding.set(context.getConf());
-  }
-
-  private boolean isUDF(ReadEntity readEntity) {
-    return readEntity.getType().equals(Type.UDF);
-  }
-
-  private boolean isBuiltinUDF(ReadEntity readEntity) {
-    return readEntity.getType().equals(Type.UDF) &&
-        readEntity.getUDF().isNative();
-
-  }
-
-  private void checkUDFWhiteList(String queryUDF) throws AuthorizationException {
-    String whiteList = authzConf.get(HiveAuthzConf.AuthzConfVars.AUTHZ_UDF_WHITELIST.getVar());
-    if (whiteList == null) {
-      return;
-    }
-    for (String hiveUDF : Splitter.on(",").omitEmptyStrings().trimResults().split(whiteList)) {
-      if (queryUDF.equalsIgnoreCase(hiveUDF)) {
-        return; // found the given UDF in whitelist
-      }
-    }
-    throw new AuthorizationException("The UDF " + queryUDF + " is not found in the list of allowed UDFs");
   }
 
   private HiveOperation getCurrentHiveStmtOp() {
@@ -573,18 +601,21 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       objectHierarchy.add(new Table(entity.getTable().getTableName()));
       break;
     case PARTITION:
+    case DUMMYPARTITION:
       objectHierarchy.add(new Database(entity.getPartition().getTable().getDbName()));
       objectHierarchy.add(new Table(entity.getPartition().getTable().getTableName()));
       break;
     case DFS_DIR:
     case LOCAL_DIR:
       try {
-        objectHierarchy.add(parseURI(entity.toString()));
+        objectHierarchy.add(parseURI(entity.toString(),
+            entity.getType().equals(Entity.Type.LOCAL_DIR)));
       } catch (Exception e) {
         throw new AuthorizationException("Failed to get File URI", e);
       }
       break;
     case DATABASE:
+    case FUNCTION:
       // TODO use database entities from compiler instead of capturing from AST
       break;
     default:
@@ -594,10 +625,67 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
     return objectHierarchy;
   }
 
+  /**
+   * Add column level hierarchy to inputHierarchy
+   *
+   * @param inputHierarchy
+   * @param entity
+   * @param sentryContext
+   */
+  private void addColumnHierarchy(List<List<DBModelAuthorizable>> inputHierarchy,
+      ReadEntity entity) {
+    List<DBModelAuthorizable> entityHierarchy = new ArrayList<DBModelAuthorizable>();
+    entityHierarchy.add(hiveAuthzBinding.getAuthServer());
+    entityHierarchy.addAll(getAuthzHierarchyFromEntity(entity));
+
+    switch (entity.getType()) {
+    case TABLE:
+    case PARTITION:
+      List<String> cols = entity.getAccessedColumns();
+      for (String col : cols) {
+        List<DBModelAuthorizable> colHierarchy = new ArrayList<DBModelAuthorizable>(entityHierarchy);
+        colHierarchy.add(new Column(col));
+        inputHierarchy.add(colHierarchy);
+      }
+      break;
+    default:
+      inputHierarchy.add(entityHierarchy);
+    }
+  }
+
+  /**
+   * Get Authorizable from inputs and put into inputHierarchy
+   *
+   * @param inputHierarchy
+   * @param entity
+   * @param sentryContext
+   */
+  private void getInputHierarchyFromInputs(List<List<DBModelAuthorizable>> inputHierarchy,
+      Set<ReadEntity> inputs) {
+    for (ReadEntity readEntity: inputs) {
+      // skip the tables/view that are part of expanded view definition
+      // skip the Hive generated dummy entities created for queries like 'select <expr>'
+      if (isChildTabForView(readEntity) || isDummyEntity(readEntity)) {
+        continue;
+      }
+      if (readEntity.getAccessedColumns() != null && !readEntity.getAccessedColumns().isEmpty()) {
+        addColumnHierarchy(inputHierarchy, readEntity);
+      } else {
+        List<DBModelAuthorizable> entityHierarchy = new ArrayList<DBModelAuthorizable>();
+        entityHierarchy.add(hiveAuthzBinding.getAuthServer());
+        entityHierarchy.addAll(getAuthzHierarchyFromEntity(readEntity));
+        inputHierarchy.add(entityHierarchy);
+      }
+    }
+  }
+
   // Check if this write entity needs to skipped
   private boolean filterWriteEntity(WriteEntity writeEntity)
       throws AuthorizationException {
     // skip URI validation for session scratch file URIs
+    if (writeEntity.isTempURI()) {
+      return true;
+    }
     try {
       if (writeEntity.getTyp().equals(Type.DFS_DIR)
           || writeEntity.getTyp().equals(Type.LOCAL_DIR)) {
@@ -631,7 +719,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
     List<String> filteredResult = new ArrayList<String>();
     Subject subject = new Subject(userName);
     HiveAuthzPrivileges tableMetaDataPrivilege = new HiveAuthzPrivileges.AuthzPrivilegeBuilder().
-        addInputObjectPriviledge(AuthorizableType.Table, EnumSet.of(DBModelAction.SELECT, DBModelAction.INSERT)).
+        addInputObjectPriviledge(AuthorizableType.Column, EnumSet.of(DBModelAction.SELECT, DBModelAction.INSERT)).
         setOperationScope(HiveOperationScope.TABLE).
         setOperationType(HiveOperationType.INFO).
         build();
@@ -648,6 +736,7 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
       externalAuthorizableHierarchy.add(hiveAuthzBinding.getAuthServer());
       externalAuthorizableHierarchy.add(database);
       externalAuthorizableHierarchy.add(table);
+      externalAuthorizableHierarchy.add(Column.ALL);
       inputHierarchy.add(externalAuthorizableHierarchy);
 
       try {
@@ -664,13 +753,49 @@ public class HiveAuthzBindingHook extends AbstractSemanticAnalyzerHook {
     return filteredResult;
   }
 
+  public static List<FieldSchema> filterShowColumns(
+      HiveAuthzBinding hiveAuthzBinding, List<FieldSchema> cols,
+      HiveOperation operation, String userName, String tableName, String dbName)
+          throws SemanticException {
+    List<FieldSchema> filteredResult = new ArrayList<FieldSchema>();
+    Subject subject = new Subject(userName);
+    HiveAuthzPrivileges columnMetaDataPrivilege =
+        HiveAuthzPrivilegesMap.getHiveAuthzPrivileges(HiveOperation.SHOWCOLUMNS);
+
+    Database database = new Database(dbName);
+    Table table = new Table(tableName);
+    for (FieldSchema col : cols) {
+      // if user has privileges on column, add to filtered list, else discard
+      List<List<DBModelAuthorizable>> inputHierarchy = new ArrayList<List<DBModelAuthorizable>>();
+      List<List<DBModelAuthorizable>> outputHierarchy = new ArrayList<List<DBModelAuthorizable>>();
+      List<DBModelAuthorizable> externalAuthorizableHierarchy = new ArrayList<DBModelAuthorizable>();
+      externalAuthorizableHierarchy.add(hiveAuthzBinding.getAuthServer());
+      externalAuthorizableHierarchy.add(database);
+      externalAuthorizableHierarchy.add(table);
+      externalAuthorizableHierarchy.add(new Column(col.getName()));
+      inputHierarchy.add(externalAuthorizableHierarchy);
+
+      try {
+        hiveAuthzBinding.authorize(operation, columnMetaDataPrivilege, subject,
+            inputHierarchy, outputHierarchy);
+        filteredResult.add(col);
+      } catch (AuthorizationException e) {
+        // squash the exception, user doesn't have privileges, so the column is
+        // not added to
+        // filtered list.
+        ;
+      }
+    }
+    return filteredResult;
+  }
+
   public static List<String> filterShowDatabases(
       HiveAuthzBinding hiveAuthzBinding, List<String> queryResult,
       HiveOperation operation, String userName) throws SemanticException {
     List<String> filteredResult = new ArrayList<String>();
     Subject subject = new Subject(userName);
     HiveAuthzPrivileges anyPrivilege = new HiveAuthzPrivileges.AuthzPrivilegeBuilder().
-        addInputObjectPriviledge(AuthorizableType.Table, EnumSet.of(DBModelAction.SELECT, DBModelAction.INSERT)).
+        addInputObjectPriviledge(AuthorizableType.Column, EnumSet.of(DBModelAction.SELECT, DBModelAction.INSERT)).
         addInputObjectPriviledge(AuthorizableType.URI, EnumSet.of(DBModelAction.SELECT)).
         setOperationScope(HiveOperationScope.CONNECT).
         setOperationType(HiveOperationType.QUERY).
@@ -698,6 +823,7 @@ hiveAuthzBinding.getAuthzConf().get(
       externalAuthorizableHierarchy.add(hiveAuthzBinding.getAuthServer());
       externalAuthorizableHierarchy.add(database);
       externalAuthorizableHierarchy.add(Table.ALL);
+      externalAuthorizableHierarchy.add(Column.ALL);
       inputHierarchy.add(externalAuthorizableHierarchy);
 
       try {
@@ -784,5 +910,10 @@ hiveAuthzBinding.getAuthzConf().get(
     }
 
     return hooks;
+  }
+
+  // Check if the given entity is identified as dummy by Hive compilers.
+  private boolean isDummyEntity(Entity entity) {
+    return entity.isDummy();
   }
 }

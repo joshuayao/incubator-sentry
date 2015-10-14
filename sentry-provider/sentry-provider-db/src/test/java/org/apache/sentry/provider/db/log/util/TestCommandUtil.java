@@ -18,21 +18,22 @@
 
 package org.apache.sentry.provider.db.log.util;
 
-import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 import junit.framework.TestCase;
 
 import org.apache.sentry.core.model.db.AccessConstants;
-import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleAddGroupsRequest;
-import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleDeleteGroupsRequest;
+import org.apache.sentry.provider.db.generic.service.thrift.TAuthorizable;
 import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleGrantPrivilegeRequest;
 import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleRevokePrivilegeRequest;
 import org.apache.sentry.provider.db.service.thrift.TSentryGrantOption;
-import org.apache.sentry.provider.db.service.thrift.TSentryGroup;
 import org.apache.sentry.provider.db.service.thrift.TSentryPrivilege;
 import org.apache.sentry.service.thrift.ServiceConstants.PrivilegeScope;
 import org.junit.Test;
+
+import com.google.common.collect.Sets;
 
 public class TestCommandUtil extends TestCase {
 
@@ -54,18 +55,11 @@ public class TestCommandUtil extends TestCase {
   @Test
   public void testCreateCmdForRoleAddOrDeleteGroup1() {
 
-    TAlterSentryRoleAddGroupsRequest requestAdd = getRoleAddGroupsRequest();
-    TAlterSentryRoleDeleteGroupsRequest requestDelete = getRoleDeleteGroupsRequest();
-
-    Set<TSentryGroup> groups = getGroups(1);
-    requestAdd.setGroups(groups);
-    requestDelete.setGroups(groups);
-
-    String createRoleAddGroupCmdResult = CommandUtil
-        .createCmdForRoleAddGroup(requestAdd);
+    String createRoleAddGroupCmdResult = CommandUtil.createCmdForRoleAddGroup("testRole",
+        getGroupStr(1));
     String createRoleAddGroupCmdExcepted = "GRANT ROLE testRole TO GROUP testGroup1";
-    String createRoleDeleteGroupCmdResult = CommandUtil
-        .createCmdForRoleDeleteGroup(requestDelete);
+    String createRoleDeleteGroupCmdResult = CommandUtil.createCmdForRoleDeleteGroup("testRole",
+        getGroupStr(1));
     String createRoleDeleteGroupCmdExcepted = "REVOKE ROLE testRole FROM GROUP testGroup1";
 
     assertEquals(createRoleAddGroupCmdExcepted, createRoleAddGroupCmdResult);
@@ -75,19 +69,11 @@ public class TestCommandUtil extends TestCase {
 
   @Test
   public void testCreateCmdForRoleAddOrDeleteGroup2() {
-
-    TAlterSentryRoleAddGroupsRequest requestAdd = getRoleAddGroupsRequest();
-    TAlterSentryRoleDeleteGroupsRequest requestDelete = getRoleDeleteGroupsRequest();
-
-    Set<TSentryGroup> groups = getGroups(3);
-    requestAdd.setGroups(groups);
-    requestDelete.setGroups(groups);
-
-    String createRoleAddGroupCmdResult = CommandUtil
-        .createCmdForRoleAddGroup(requestAdd);
+    String createRoleAddGroupCmdResult = CommandUtil.createCmdForRoleAddGroup("testRole",
+        getGroupStr(3));
     String createRoleAddGroupCmdExcepted = "GRANT ROLE testRole TO GROUP testGroup1, testGroup2, testGroup3";
-    String createRoleDeleteGroupCmdResult = CommandUtil
-        .createCmdForRoleDeleteGroup(requestDelete);
+    String createRoleDeleteGroupCmdResult = CommandUtil.createCmdForRoleDeleteGroup("testRole",
+        getGroupStr(3));
     String createRoleDeleteGroupCmdExcepted = "REVOKE ROLE testRole FROM GROUP testGroup1, testGroup2, testGroup3";
 
     assertEquals(createRoleAddGroupCmdExcepted, createRoleAddGroupCmdResult);
@@ -103,8 +89,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.ALL,
         PrivilegeScope.DATABASE.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -126,8 +114,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.INSERT,
         PrivilegeScope.DATABASE.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -149,8 +139,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.SELECT,
         PrivilegeScope.DATABASE.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -172,8 +164,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(null,
         PrivilegeScope.DATABASE.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -195,8 +189,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.SELECT,
         PrivilegeScope.TABLE.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -218,8 +214,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.SELECT,
         PrivilegeScope.SERVER.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -241,8 +239,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.SELECT,
         PrivilegeScope.URI.name(), "dbTest", "tableTest", "serverTest",
         "hdfs://namenode:port/path/to/dir");
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil
         .createCmdForGrantPrivilege(grantRequest);
@@ -264,8 +264,10 @@ public class TestCommandUtil extends TestCase {
     TSentryPrivilege privilege = getPrivilege(AccessConstants.SELECT, PrivilegeScope.SERVER.name(),
         "dbTest", "tableTest", "serverTest", "hdfs://namenode:port/path/to/dir");
     privilege.setGrantOption(TSentryGrantOption.TRUE);
-    grantRequest.setPrivilege(privilege);
-    revokeRequest.setPrivilege(privilege);
+    Set<TSentryPrivilege> privileges = Sets.newHashSet();
+    privileges.add(privilege);
+    grantRequest.setPrivileges(privileges);
+    revokeRequest.setPrivileges(privileges);
 
     String createGrantPrivilegeCmdResult = CommandUtil.createCmdForGrantPrivilege(grantRequest);
     String createGrantPrivilegeCmdExcepted = "GRANT SELECT ON SERVER serverTest TO ROLE testRole WITH GRANT OPTION";
@@ -276,26 +278,55 @@ public class TestCommandUtil extends TestCase {
     assertEquals(createRevokePrivilegeCmdExcepted, createRevokePrivilegeCmdResult);
   }
 
-  private TAlterSentryRoleAddGroupsRequest getRoleAddGroupsRequest() {
-    TAlterSentryRoleAddGroupsRequest request = new TAlterSentryRoleAddGroupsRequest();
-    request.setRoleName("testRole");
-    return request;
+  // generate the command without grant option
+  @Test
+  public void testCreateCmdForGrantOrRevokeGMPrivilege1() {
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest grantRequest = getGrantGMPrivilegeRequest();
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest revokeRequest = getRevokeGMPrivilegeRequest();
+    org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege privilege = getGMPrivilege();
+    grantRequest.setPrivilege(privilege);
+    revokeRequest.setPrivilege(privilege);
+
+    String createGrantPrivilegeCmdResult = CommandUtil.createCmdForGrantGMPrivilege(grantRequest);
+    String createGrantPrivilegeCmdExcepted = "GRANT ACTION ON resourceType1 resourceName1 resourceType2 resourceName2 TO ROLE testRole";
+    String createRevokePrivilegeCmdResult = CommandUtil
+        .createCmdForRevokeGMPrivilege(revokeRequest);
+    String createRevokePrivilegeCmdExcepted = "REVOKE ACTION ON resourceType1 resourceName1 resourceType2 resourceName2 FROM ROLE testRole";
+
+    assertEquals(createGrantPrivilegeCmdExcepted, createGrantPrivilegeCmdResult);
+    assertEquals(createRevokePrivilegeCmdExcepted, createRevokePrivilegeCmdResult);
   }
 
-  private TAlterSentryRoleDeleteGroupsRequest getRoleDeleteGroupsRequest() {
-    TAlterSentryRoleDeleteGroupsRequest request = new TAlterSentryRoleDeleteGroupsRequest();
-    request.setRoleName("testRole");
-    return request;
+  // generate the command with grant option
+  @Test
+  public void testCreateCmdForGrantOrRevokeGMPrivilege2() {
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest grantRequest = getGrantGMPrivilegeRequest();
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest revokeRequest = getRevokeGMPrivilegeRequest();
+    org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege privilege = getGMPrivilege();
+    privilege
+        .setGrantOption(org.apache.sentry.provider.db.generic.service.thrift.TSentryGrantOption.TRUE);
+    grantRequest.setPrivilege(privilege);
+    revokeRequest.setPrivilege(privilege);
+
+    String createGrantPrivilegeCmdResult = CommandUtil.createCmdForGrantGMPrivilege(grantRequest);
+    String createGrantPrivilegeCmdExcepted = "GRANT ACTION ON resourceType1 resourceName1 resourceType2 resourceName2 TO ROLE testRole WITH GRANT OPTION";
+    String createRevokePrivilegeCmdResult = CommandUtil
+        .createCmdForRevokeGMPrivilege(revokeRequest);
+    String createRevokePrivilegeCmdExcepted = "REVOKE ACTION ON resourceType1 resourceName1 resourceType2 resourceName2 FROM ROLE testRole WITH GRANT OPTION";
+
+    assertEquals(createGrantPrivilegeCmdExcepted, createGrantPrivilegeCmdResult);
+    assertEquals(createRevokePrivilegeCmdExcepted, createRevokePrivilegeCmdResult);
   }
 
-  private Set<TSentryGroup> getGroups(int num) {
-    Set<TSentryGroup> groups = new LinkedHashSet<TSentryGroup>();
+  private String getGroupStr(int num) {
+    StringBuilder sb = new StringBuilder();
     for (int i = 0; i < num; i++) {
-      TSentryGroup group = new TSentryGroup();
-      group.setGroupName("testGroup" + (i + 1));
-      groups.add(group);
+      if (i > 0) {
+        sb.append(", ");
+      }
+      sb.append("testGroup" + (i + 1));
     }
-    return groups;
+    return sb.toString();
   }
 
   private TAlterSentryRoleGrantPrivilegeRequest getGrantPrivilegeRequest() {
@@ -310,6 +341,18 @@ public class TestCommandUtil extends TestCase {
     return request;
   }
 
+  private org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest getGrantGMPrivilegeRequest() {
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest request = new org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest();
+    request.setRoleName("testRole");
+    return request;
+  }
+
+  private org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest getRevokeGMPrivilegeRequest() {
+    org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest request = new org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest();
+    request.setRoleName("testRole");
+    return request;
+  }
+
   private TSentryPrivilege getPrivilege(String action, String privilegeScope,
       String dbName, String tableName, String serverName, String URI) {
     TSentryPrivilege privilege = new TSentryPrivilege();
@@ -319,6 +362,17 @@ public class TestCommandUtil extends TestCase {
     privilege.setTableName(tableName);
     privilege.setServerName(serverName);
     privilege.setURI(URI);
+    return privilege;
+  }
+
+  private org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege getGMPrivilege() {
+    org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege privilege = new org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege();
+    privilege.setAction("ACTION");
+    privilege.setComponent("COMPONENT");
+    List<TAuthorizable> authorizables = new ArrayList<TAuthorizable>();
+    authorizables.add(new TAuthorizable("resourceType1", "resourceName1"));
+    authorizables.add(new TAuthorizable("resourceType2", "resourceName2"));
+    privilege.setAuthorizables(authorizables);
     return privilege;
   }
 }

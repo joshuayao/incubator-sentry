@@ -22,6 +22,8 @@ import java.util.Map;
 
 import javax.security.sasl.Sasl;
 
+import org.apache.sentry.provider.db.service.thrift.SentryMetrics;
+
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableMap;
 
@@ -66,14 +68,21 @@ public class ServiceConstants {
     public static final String RPC_MIN_THREADS = "sentry.service.server-min-threads";
     public static final int RPC_MIN_THREADS_DEFAULT = 10;
     public static final String ALLOW_CONNECT = "sentry.service.allow.connect";
+
+    public static final String SENTRY_POLICY_STORE_PLUGINS = "sentry.policy.store.plugins";
+    public static final String SENTRY_POLICY_STORE_PLUGINS_DEFAULT = "";
+
+    public static final String SENTRY_METASTORE_PLUGINS = "sentry.metastore.plugins";
+    public static final String SENTRY_METASTORE_PLUGINS_DEFAULT = "";
+
     public static final String PROCESSOR_FACTORIES = "sentry.service.processor.factories";
     public static final String PROCESSOR_FACTORIES_DEFAULT =
-        "org.apache.sentry.provider.db.service.thrift.SentryPolicyStoreProcessorFactory";
+        "org.apache.sentry.provider.db.service.thrift.SentryPolicyStoreProcessorFactory" +
+            ",org.apache.sentry.provider.db.generic.service.thrift.SentryGenericPolicyProcessorFactory";
     public static final String SENTRY_STORE_JDBC_URL = "sentry.store.jdbc.url";
     public static final String SENTRY_STORE_JDBC_USER = "sentry.store.jdbc.user";
     public static final String SENTRY_STORE_JDBC_USER_DEFAULT = "Sentry";
     public static final String SENTRY_STORE_JDBC_PASS = "sentry.store.jdbc.password";
-    public static final String SENTRY_STORE_JDBC_PASS_DEFAULT = "Sentry";
     public static final String SENTRY_STORE_JDBC_DRIVER = "sentry.store.jdbc.driver";
     public static final String SENTRY_STORE_JDBC_DRIVER_DEFAULT = "org.apache.derby.jdbc.EmbeddedDriver";
 
@@ -91,37 +100,73 @@ public class ServiceConstants {
 
     public static final String SENTRY_SERVICE_NAME = "sentry.service.name";
     public static final String SENTRY_SERVICE_NAME_DEFAULT = "Sentry-Service";
-    
+
     public static final String SENTRY_STORE_GROUP_MAPPING = "sentry.store.group.mapping";
     public static final String SENTRY_STORE_GROUP_MAPPING_RESOURCE = "sentry.store.group.mapping.resource";
     public static final String SENTRY_STORE_HADOOP_GROUP_MAPPING = "org.apache.sentry.provider.common.HadoopGroupMappingService";
     public static final String SENTRY_STORE_LOCAL_GROUP_MAPPING = "org.apache.sentry.provider.file.LocalGroupMappingService";
     public static final String SENTRY_STORE_GROUP_MAPPING_DEFAULT = SENTRY_STORE_HADOOP_GROUP_MAPPING;
 
+    public static final String SENTRY_STORE_ORPHANED_PRIVILEGE_REMOVAL = "sentry.store.orphaned.privilege.removal";
+    public static final String SENTRY_STORE_ORPHANED_PRIVILEGE_REMOVAL_DEFAULT = "false";
+    public static final String SENTRY_HA_ENABLED = "sentry.ha.enabled";
+    public static final boolean SENTRY_HA_ENABLED_DEFAULT = false;
+    public static final String SENTRY_HA_ZK_PROPERTY_PREFIX = "sentry.ha.zookeeper.";
+    public static final String SENTRY_HA_ZOOKEEPER_SECURITY = SENTRY_HA_ZK_PROPERTY_PREFIX + "security";
+    public static final boolean SENTRY_HA_ZOOKEEPER_SECURITY_DEFAULT = false;
+    public static final String SENTRY_HA_ZOOKEEPER_QUORUM = SENTRY_HA_ZK_PROPERTY_PREFIX + "quorum";
+    public static final String SENTRY_HA_ZOOKEEPER_QUORUM_DEFAULT = "localhost:2181";
+    public static final String SENTRY_HA_ZOOKEEPER_RETRIES_MAX_COUNT = SENTRY_HA_ZK_PROPERTY_PREFIX + "session.retries.max.count";
+    public static final int SENTRY_HA_ZOOKEEPER_RETRIES_MAX_COUNT_DEFAULT = 3;
+    public static final String SENTRY_HA_ZOOKEEPER_SLEEP_BETWEEN_RETRIES_MS = SENTRY_HA_ZK_PROPERTY_PREFIX + "session.sleep.between.retries.ms";
+    public static final int SENTRY_HA_ZOOKEEPER_SLEEP_BETWEEN_RETRIES_MS_DEFAULT = 100;
+    public static final String SENTRY_HA_ZOOKEEPER_NAMESPACE = SENTRY_HA_ZK_PROPERTY_PREFIX + "namespace";
+    public static final String SENTRY_HA_ZOOKEEPER_NAMESPACE_DEFAULT = "sentry";
+    // principal and keytab for client to be able to connect to secure ZK. Needed for Sentry HA with secure ZK
+    public static final String SERVER_HA_ZOOKEEPER_CLIENT_PRINCIPAL = "sentry.zookeeper.client.principal";
+    public static final String SERVER_HA_ZOOKEEPER_CLIENT_KEYTAB = "sentry.zookeeper.client.keytab";
+    public static final String SERVER_HA_ZOOKEEPER_CLIENT_TICKET_CACHE = "sentry.zookeeper.client.ticketcache";
+    public static final String SERVER_HA_ZOOKEEPER_CLIENT_TICKET_CACHE_DEFAULT = "false";
     public static final ImmutableMap<String, String> SENTRY_STORE_DEFAULTS =
         ImmutableMap.<String, String>builder()
-    .put("datanucleus.connectionPoolingType", "BoneCP")
-    .put("datanucleus.validateTables", "false")
-    .put("datanucleus.validateColumns", "false")
-    .put("datanucleus.validateConstraints", "false")
-    .put("datanucleus.storeManagerType", "rdbms")
+        .put("datanucleus.connectionPoolingType", "BoneCP")
+        .put("datanucleus.validateTables", "false")
+        .put("datanucleus.validateColumns", "false")
+        .put("datanucleus.validateConstraints", "false")
+        .put("datanucleus.storeManagerType", "rdbms")
         .put("datanucleus.autoCreateSchema", "false")
         .put("datanucleus.fixedDatastore", "true")
-    .put("datanucleus.autoStartMechanismMode", "checked")
-    .put("datanucleus.transactionIsolation", "read-committed")
-    .put("datanucleus.cache.level2", "false")
-    .put("datanucleus.cache.level2.type", "none")
-    .put("datanucleus.identifierFactory", "datanucleus1")
-    .put("datanucleus.rdbms.useLegacyNativeValueStrategy", "true")
-    .put("datanucleus.plugin.pluginRegistryBundleCheck", "LOG")
-    .put("javax.jdo.PersistenceManagerFactoryClass",
-                     "org.datanucleus.api.jdo.JDOPersistenceManagerFactory")
-    .put("javax.jdo.option.DetachAllOnCommit", "true")
-    .put("javax.jdo.option.NonTransactionalRead", "false")
-    .put("javax.jdo.option.NonTransactionalWrite", "false")
-    .put("javax.jdo.option.Multithreaded", "true")
-    .build();
+        .put("datanucleus.autoStartMechanismMode", "checked")
+        .put("datanucleus.transactionIsolation", "read-committed")
+        .put("datanucleus.cache.level2", "false")
+        .put("datanucleus.cache.level2.type", "none")
+        .put("datanucleus.identifierFactory", "datanucleus1")
+        .put("datanucleus.rdbms.useLegacyNativeValueStrategy", "true")
+        .put("datanucleus.plugin.pluginRegistryBundleCheck", "LOG")
+        .put("javax.jdo.PersistenceManagerFactoryClass",
+            "org.datanucleus.api.jdo.JDOPersistenceManagerFactory")
+            .put("javax.jdo.option.DetachAllOnCommit", "true")
+            .put("javax.jdo.option.NonTransactionalRead", "false")
+            .put("javax.jdo.option.NonTransactionalWrite", "false")
+            .put("javax.jdo.option.Multithreaded", "true")
+            .build();
 
+    public static final String SENTRY_WEB_ENABLE = "sentry.service.web.enable";
+    public static final Boolean SENTRY_WEB_ENABLE_DEFAULT = false;
+    public static final String SENTRY_WEB_PORT = "sentry.service.web.port";
+    public static final int SENTRY_WEB_PORT_DEFAULT = 51000;
+    public static final String SENTRY_REPORTER = "sentry.service.reporter";
+    public static final String SENTRY_REPORTER_JMX = SentryMetrics.Reporting.JMX.name(); //case insensitive
+    public static final String SENTRY_REPORTER_CONSOLE = SentryMetrics.Reporting.CONSOLE.name();//case insensitive
+
+    // Web Security
+    public static final String SENTRY_WEB_SECURITY_PREFIX = "sentry.service.web.authentication";
+    public static final String SENTRY_WEB_SECURITY_TYPE = SENTRY_WEB_SECURITY_PREFIX + ".type";
+    public static final String SENTRY_WEB_SECURITY_TYPE_NONE = "NONE";
+    public static final String SENTRY_WEB_SECURITY_TYPE_KERBEROS = "KERBEROS";
+    public static final String SENTRY_WEB_SECURITY_PRINCIPAL = SENTRY_WEB_SECURITY_PREFIX + ".kerberos.principal";
+    public static final String SENTRY_WEB_SECURITY_KEYTAB = SENTRY_WEB_SECURITY_PREFIX + ".kerberos.keytab";
+    public static final String SENTRY_WEB_SECURITY_ALLOW_CONNECT_USERS = SENTRY_WEB_SECURITY_PREFIX + ".allow.connect.users";
   }
   public static class ClientConfig {
     public static final ImmutableMap<String, String> SASL_PROPERTIES = ServiceConstants.SASL_PROPERTIES;
@@ -130,13 +175,38 @@ public class ServiceConstants {
     public static final String SERVER_RPC_ADDRESS = "sentry.service.client.server.rpc-address";
     public static final String SERVER_RPC_CONN_TIMEOUT = "sentry.service.client.server.rpc-connection-timeout";
     public static final int SERVER_RPC_CONN_TIMEOUT_DEFAULT = 200000;
+
+    // HA configuration
+    public static final String SERVER_HA_ENABLED = "sentry.ha.enabled";
+    public static final boolean SERVER_HA_ENABLED_DEFAULT = ServerConfig.SENTRY_HA_ENABLED_DEFAULT;
+    public static final String SENTRY_HA_ZOOKEEPER_QUORUM = ServerConfig.SENTRY_HA_ZOOKEEPER_QUORUM;
+    public static final String SERVER_HA_ZOOKEEPER_QUORUM_DEFAULT = ServerConfig.SENTRY_HA_ZOOKEEPER_QUORUM_DEFAULT;
+    public static final String SENTRY_HA_ZOOKEEPER_NAMESPACE = ServerConfig.SENTRY_HA_ZOOKEEPER_NAMESPACE;
+    public static final String SERVER_HA_ZOOKEEPER_NAMESPACE_DEFAULT = ServerConfig.SENTRY_HA_ZOOKEEPER_NAMESPACE_DEFAULT;
+
+    // connection pool configuration
+    public static final String SENTRY_POOL_ENABLED = "sentry.service.client.connection.pool.enabled";
+    public static final boolean SENTRY_POOL_ENABLED_DEFAULT = false;
+
+    // commons-pool configuration for pool size
+    public static final String SENTRY_POOL_MAX_TOTAL = "sentry.service.client.connection.pool.max-total";
+    public static final int SENTRY_POOL_MAX_TOTAL_DEFAULT = 8;
+    public static final String SENTRY_POOL_MAX_IDLE = "sentry.service.client.connection.pool.max-idle";
+    public static final int SENTRY_POOL_MAX_IDLE_DEFAULT = 8;
+    public static final String SENTRY_POOL_MIN_IDLE = "sentry.service.client.connection.pool.min-idle";
+    public static final int SENTRY_POOL_MIN_IDLE_DEFAULT = 0;
+
+    // retry num for getting the connection from connection pool
+    public static final String SENTRY_POOL_RETRY_TOTAL = "sentry.service.client.connection.pool.retry-total";
+    public static final int SENTRY_POOL_RETRY_TOTAL_DEFAULT = 3;
+
   }
 
   /**
    * Thrift generates terrible constant class names
    */
   public static class ThriftConstants extends org.apache.sentry.service.thrift.sentry_common_serviceConstants {
-    public static final int TSENTRY_SERVICE_VERSION_CURRENT = TSENTRY_SERVICE_V1;
+    public static final int TSENTRY_SERVICE_VERSION_CURRENT = TSENTRY_SERVICE_V2;
   }
 
   /* Privilege operation scope */

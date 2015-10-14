@@ -25,6 +25,7 @@ import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveAuthorizer;
 import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveAuthorizerFactory;
 import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveAuthorizerImpl;
 import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveAuthzPluginException;
+import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveAuthzSessionContext;
 import org.apache.hadoop.hive.ql.security.authorization.plugin.HiveMetastoreClientFactory;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hive.service.cli.HiveSQLException;
@@ -38,8 +39,6 @@ public class HiveAuthzBindingSessionHook
 
   public static final String SEMANTIC_HOOK =
     "org.apache.sentry.binding.hive.HiveAuthzBindingHook";
-  public static final String PRE_EXEC_HOOK =
-    "org.apache.sentry.binding.hive.HiveAuthzBindingPreExecHook";
   public static final String FILTER_HOOK =
     "org.apache.sentry.binding.hive.HiveAuthzBindingHook";
   public static final String SCRATCH_DIR_PERMISSIONS = "700";
@@ -57,6 +56,8 @@ public class HiveAuthzBindingSessionHook
     ConfVars.SCRATCHDIRPERMISSION.varname,
     ConfVars.HIVE_SECURITY_COMMAND_WHITELIST.varname,
     ConfVars.HIVE_AUTHORIZATION_TASK_FACTORY.varname,
+    ConfVars.HIVE_CAPTURE_TRANSFORM_ENTITY.varname,
+    ConfVars.HIVERELOADABLEJARS.varname,
     HiveAuthzConf.HIVE_ACCESS_CONF_URL,
     HiveAuthzConf.HIVE_SENTRY_CONF_URL,
     HiveAuthzConf.HIVE_ACCESS_SUBJECT_NAME,
@@ -70,11 +71,9 @@ public class HiveAuthzBindingSessionHook
     @Override
     public HiveAuthorizer createHiveAuthorizer(
         HiveMetastoreClientFactory metastoreClientFactory, HiveConf conf,
-        HiveAuthenticationProvider hiveAuthenticator)
-        throws HiveAuthzPluginException {
-      // TODO Auto-generated method stub
-      return new SentryHiveAuthorizerImpl(null, null);
-    }
+        HiveAuthenticationProvider hiveAuthenticator,
+        HiveAuthzSessionContext ctx) throws HiveAuthzPluginException {
+      return new SentryHiveAuthorizerImpl(null, null);    }
   }
 
   public static class SentryHiveAuthorizerImpl extends HiveAuthorizerImpl {
@@ -97,7 +96,7 @@ public class HiveAuthzBindingSessionHook
    * 2. Set additional config properties required for auth
    *      set HIVE_EXTENDED_ENITITY_CAPTURE = true
    *      set SCRATCHDIRPERMISSION = 700
-   * 3. Add sensetive config parameters to the config restrict list so that they can't be overridden by users
+   * 3. Add sensitive config parameters to the config restrict list so that they can't be overridden by users
    */
   @Override
   public void run(HiveSessionHookContext sessionHookContext) throws HiveSQLException {
@@ -106,9 +105,13 @@ public class HiveAuthzBindingSessionHook
 
     appendConfVar(sessionConf, ConfVars.SEMANTIC_ANALYZER_HOOK.varname,
         SEMANTIC_HOOK);
-    appendConfVar(sessionConf, ConfVars.PREEXECHOOKS.varname, PRE_EXEC_HOOK);
-    sessionConf.setVar(ConfVars.HIVE_SECURITY_COMMAND_WHITELIST, "set");
+    HiveAuthzConf authzConf = HiveAuthzBindingHook.loadAuthzConf(sessionConf);
+    String commandWhitelist =
+        authzConf.get(HiveAuthzConf.HIVE_SENTRY_SECURITY_COMMAND_WHITELIST,
+            HiveAuthzConf.HIVE_SENTRY_SECURITY_COMMAND_WHITELIST_DEFAULT);
+    sessionConf.setVar(ConfVars.HIVE_SECURITY_COMMAND_WHITELIST, commandWhitelist);
     sessionConf.setVar(ConfVars.SCRATCHDIRPERMISSION, SCRATCH_DIR_PERMISSIONS);
+    sessionConf.setBoolVar(ConfVars.HIVE_CAPTURE_TRANSFORM_ENTITY, true);
 
     // set user name
     sessionConf.set(HiveAuthzConf.HIVE_ACCESS_SUBJECT_NAME, sessionHookContext.getSessionUser());

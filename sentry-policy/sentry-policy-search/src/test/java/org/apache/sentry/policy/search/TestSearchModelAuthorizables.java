@@ -26,7 +26,7 @@ import org.junit.Test;
 public class TestSearchModelAuthorizables {
 
   @Test
-  public void testServer() throws Exception {
+  public void testCollection() throws Exception {
     Collection coll = (Collection)SearchModelAuthorizables.from("CoLleCtiOn=collection1");
     assertEquals("collection1", coll.getName());
   }

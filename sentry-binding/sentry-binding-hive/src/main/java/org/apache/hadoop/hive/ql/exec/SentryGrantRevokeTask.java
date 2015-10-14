@@ -39,6 +39,7 @@ import org.apache.hadoop.hive.ql.hooks.ReadEntity;
 import org.apache.hadoop.hive.ql.hooks.WriteEntity;
 import org.apache.hadoop.hive.ql.metadata.AuthorizationException;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
+import org.apache.hadoop.hive.ql.parse.SemanticException;
 import org.apache.hadoop.hive.ql.plan.DDLWork;
 import org.apache.hadoop.hive.ql.plan.GrantDesc;
 import org.apache.hadoop.hive.ql.plan.GrantRevokeRoleDDL;
@@ -66,6 +67,7 @@ import org.apache.sentry.core.common.Subject;
 import org.apache.sentry.core.common.utils.PathUtils;
 import org.apache.sentry.core.model.db.AccessConstants;
 import org.apache.sentry.core.model.db.AccessURI;
+import org.apache.sentry.core.model.db.Column;
 import org.apache.sentry.core.model.db.Database;
 import org.apache.sentry.core.model.db.Server;
 import org.apache.sentry.core.model.db.Table;
@@ -81,7 +83,10 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
 
 public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable {
   private static final Logger LOG = LoggerFactory
@@ -93,7 +98,6 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
   private static final int terminator = Utilities.newLineCode;
   private static final long serialVersionUID = -7625118066790571999L;
 
-  private SentryServiceClientFactory sentryClientFactory;
   private SentryPolicyServiceClient sentryClient;
   private HiveConf conf;
   private HiveAuthzBinding hiveAuthzBinding;
@@ -103,17 +107,6 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
   private Set<String> subjectGroups;
   private String ipAddress;
   private HiveOperation stmtOperation;
-
-
-  public SentryGrantRevokeTask() {
-    this(new SentryServiceClientFactory());
-  }
-  public SentryGrantRevokeTask(SentryServiceClientFactory sentryClientFactory) {
-    super();
-    this.sentryClientFactory = sentryClientFactory;
-
-  }
-
 
   @Override
   public void initialize(HiveConf conf, QueryPlan queryPlan, DriverContext ctx) {
@@ -125,7 +118,7 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
   public int execute(DriverContext driverContext) {
     try {
       try {
-        this.sentryClient = sentryClientFactory.create(authzConf);
+        this.sentryClient = SentryServiceClientFactory.create(authzConf);
       } catch (Exception e) {
         String msg = "Error creating Sentry client: " + e.getMessage();
         throw new RuntimeException(msg, e);
@@ -172,7 +165,10 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       }
     } catch(SentryUserException e) {
       setException(new Exception(e.getClass().getSimpleName() + ": " + e.getReason(), e));
-      String msg = "Error processing Sentry command: " + e.getMessage();
+      String msg = "Error processing Sentry command: " + e.getReason() + ".";
+      if (e instanceof SentryAccessDeniedException) {
+        msg += "Please grant admin privilege to " + subject.getName() + ".";
+      }
       LOG.error(msg, e);
       console.printError(msg);
       return RETURN_CODE_FAILURE;
@@ -185,6 +181,9 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
     } finally {
       if (sentryClient != null) {
         sentryClient.close();
+      }
+      if (hiveAuthzBinding != null) {
+        hiveAuthzBinding.close();
       }
     }
   }
@@ -316,7 +315,16 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       } else {
         SentryHivePrivilegeObjectDesc privSubjectDesc = toSentryHivePrivilegeObjectDesc(hiveObjectDesc);
         List<Authorizable> authorizableHeirarchy = toAuthorizable(privSubjectDesc);
-        privileges = sentryClient.listPrivilegesByRoleName(subject, principalName, authorizableHeirarchy);
+        if (privSubjectDesc.getColumns() != null && !privSubjectDesc.getColumns().isEmpty()) {
+          List<List<Authorizable>> ps = parseColumnToAuthorizable(authorizableHeirarchy, privSubjectDesc);
+          ImmutableSet.Builder<TSentryPrivilege> pbuilder = new ImmutableSet.Builder<TSentryPrivilege>();
+          for (List<Authorizable> p : ps) {
+            pbuilder.addAll(sentryClient.listPrivilegesByRoleName(subject, principalName, p));
+          }
+          privileges = pbuilder.build();
+        } else {
+          privileges = sentryClient.listPrivilegesByRoleName(subject, principalName, authorizableHeirarchy);
+        }
       }
       writeToFile(writeGrantInfo(privileges, principalName), desc.getResFile());
       return RETURN_CODE_SUCCESS;
@@ -343,7 +351,6 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       String tableName = dbTable.getTable();
       authorizableHeirarchy.add(new Table(tableName));
       authorizableHeirarchy.add(new Database(dbName));
-
     } else if (privSubjectDesc.getUri()) {
       String uriPath = privSubjectDesc.getObject();
       String warehouseDir = conf.getVar(HiveConf.ConfVars.METASTOREWAREHOUSE);
@@ -357,6 +364,21 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       authorizableHeirarchy.add(new Database(dbName));
     }
     return authorizableHeirarchy;
+  }
+
+  private List<List<Authorizable>> parseColumnToAuthorizable(List<Authorizable> authorizableHeirarchy,
+      SentryHivePrivilegeObjectDesc privSubjectDesc) {
+    ImmutableList.Builder<List<Authorizable>> listsBuilder = ImmutableList.builder();
+    List<String> cols = privSubjectDesc.getColumns();
+    if ( cols != null && !cols.isEmpty() ) {
+      for ( String col : cols ) {
+        ImmutableList.Builder<Authorizable> listBuilder = ImmutableList.builder();
+        listBuilder.addAll(authorizableHeirarchy);
+        listBuilder.add(new Column(col));
+        listsBuilder.add(listBuilder.build());
+      }
+    }
+    return listsBuilder.build();
   }
 
   private void writeToFile(String data, String file) throws IOException {
@@ -382,21 +404,26 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       boolean grantRole = desc.getGrant();
       List<PrincipalDesc> principals = desc.getPrincipalDesc();
       List<String> roles = desc.getRoles();
+      // get principals
+      Set<String> groups = Sets.newHashSet();
       for (PrincipalDesc principal : principals) {
         if (principal.getType() != PrincipalType.GROUP) {
           String msg = SentryHiveConstants.GRANT_REVOKE_NOT_SUPPORTED_FOR_PRINCIPAL +
               principal.getType();
           throw new HiveException(msg);
         }
-        String groupName = principal.getName();
-        for (String roleName : roles) {
-          if (grantRole) {
-            sentryClient.grantRoleToGroup(subject, groupName, roleName);
-          } else {
-            sentryClient.revokeRoleFromGroup(subject, groupName, roleName);
-          }
+        groups.add(principal.getName());
+      }
+
+      // grant/revoke role to/from principals
+      for (String roleName : roles) {
+        if (grantRole) {
+          sentryClient.grantRoleToGroups(subject, roleName, groups);
+        } else {
+          sentryClient.revokeRoleFromGroups(subject, roleName, groups);
         }
       }
+
     } catch (HiveException e) {
       String msg = "Error in grant/revoke operation, error message " + e.getMessage();
       LOG.warn(msg, e);
@@ -425,7 +452,7 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       }
       appendNonNull(builder, privilege.getTableName());
       appendNonNull(builder, null);//getPartValues()
-      appendNonNull(builder, null);//getColumnName()
+      appendNonNull(builder, privilege.getColumnName());//getColumnName()
       appendNonNull(builder, roleName);//getPrincipalName()
       appendNonNull(builder, "ROLE");//getPrincipalType()
       appendNonNull(builder, privilege.getAction());
@@ -502,6 +529,7 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
 
     String dbName = null;
     String tableName = null;
+    List<String> columnNames = null;
     String uriPath = null;
     String serverName = null;
     try {
@@ -528,11 +556,17 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
       for (PrivilegeDesc privDesc : privileges) {
         List<String> columns = privDesc.getColumns();
         if (columns != null && !columns.isEmpty()) {
-          throw new HiveException(SentryHiveConstants.COLUMN_PRIVS_NOT_SUPPORTED);
+          columnNames = columns;
         }
         if (!SentryHiveConstants.ALLOWED_PRIVS.contains(privDesc.getPrivilege().getPriv())) {
           String msg = SentryHiveConstants.PRIVILEGE_NOT_SUPPORTED + privDesc.getPrivilege().getPriv();
           throw new HiveException(msg);
+        }
+        if (columnNames != null && (privDesc.getPrivilege().getPriv().equals(PrivilegeType.INSERT)
+            || privDesc.getPrivilege().getPriv().equals(PrivilegeType.ALL))) {
+          String msg = SentryHiveConstants.PRIVILEGE_NOT_SUPPORTED
+              + privDesc.getPrivilege().getPriv() + " on Column";
+          throw new SemanticException(msg);
         }
       }
       for (PrincipalDesc princ : principals) {
@@ -550,21 +584,28 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
             } else if (tableName == null) {
               sentryClient.grantDatabasePrivilege(subject, princ.getName(), server, dbName,
                   toDbSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
-            } else {
+            } else if (columnNames == null) {
               sentryClient.grantTablePrivilege(subject, princ.getName(), server, dbName,
                   tableName, toSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
+            } else {
+              sentryClient.grantColumnsPrivileges(subject, princ.getName(), server, dbName,
+                  tableName, columnNames, toSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
             }
           } else {
             if (serverName != null) {
-              sentryClient.revokeServerPrivilege(subject, princ.getName(), serverName, grantOption);
+              sentryClient.revokeServerPrivilege(subject, princ.getName(), serverName,
+                toSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
             } else if (uriPath != null) {
               sentryClient.revokeURIPrivilege(subject, princ.getName(), server, uriPath, grantOption);
             } else if (tableName == null) {
               sentryClient.revokeDatabasePrivilege(subject, princ.getName(), server, dbName,
                   toDbSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
-            } else {
+            } else if (columnNames == null) {
               sentryClient.revokeTablePrivilege(subject, princ.getName(), server, dbName,
                   tableName, toSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
+            } else {
+              sentryClient.revokeColumnsPrivilege(subject, princ.getName(), server, dbName,
+                  tableName, columnNames, toSentryAction(privDesc.getPrivilege().getPriv()), grantOption);
             }
           }
         }
@@ -579,27 +620,27 @@ public class SentryGrantRevokeTask extends Task<DDLWork> implements Serializable
   }
 
   private static String toDbSentryAction(PrivilegeType privilegeType) throws SentryUserException{
-    if (PrivilegeType.ALL.equals(privilegeType)) {
-      return AccessConstants.ALL;
-    } else {
-      if (PrivilegeType.SELECT.equals(privilegeType)) {
+    switch(privilegeType) {
+      case ALL:
+        return AccessConstants.ALL;
+      case SELECT:
         return AccessConstants.SELECT;
-      } else if (PrivilegeType.INSERT.equals(privilegeType)) {
+      case INSERT:
         return AccessConstants.INSERT;
-      } else if (PrivilegeType.CREATE.equals(privilegeType)){
+      case CREATE:
         return AccessConstants.CREATE;
-      } else if (PrivilegeType.DROP.equals(privilegeType)){
+      case DROP:
         return AccessConstants.DROP;
-      } else if (PrivilegeType.ALTER_METADATA.equals(privilegeType)){
+      case ALTER_METADATA:
         return AccessConstants.ALTER;
-      } else if (PrivilegeType.INDEX.equals(privilegeType)){
+      case INDEX:
         return AccessConstants.INDEX;
-      } else if (PrivilegeType.LOCK.equals(privilegeType)){
+      case LOCK:
         return AccessConstants.LOCK;
-      } else {
-        throw new SentryUserException(privilegeType + " not handled correctly");
+      default:
+        throw new SentryUserException("Unknown privilege type: " + privilegeType);
+        //Exception is thrown here only for development purposes.
       }
-    }
   }
 
   private static SentryHivePrivilegeObjectDesc toSentryHivePrivilegeObjectDesc(PrivilegeObjectDesc privSubjectObjDesc)

@@ -25,8 +25,11 @@ import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.ServerSocket;
 import java.security.PrivilegedExceptionAction;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.EventListener;
+import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -45,22 +48,25 @@ import org.apache.hadoop.security.SaslRpcServer;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.sentry.Command;
+import org.apache.sentry.provider.db.service.thrift.SentryHealthCheckServletContextListener;
+import org.apache.sentry.provider.db.service.thrift.SentryMetricsServletContextListener;
+import org.apache.sentry.provider.db.service.thrift.SentryWebServer;
 import org.apache.sentry.service.thrift.ServiceConstants.ConfUtilties;
 import org.apache.sentry.service.thrift.ServiceConstants.ServerConfig;
 import org.apache.thrift.TMultiplexedProcessor;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.server.TServer;
+import org.apache.thrift.server.TServerEventHandler;
 import org.apache.thrift.server.TThreadPoolServer;
 import org.apache.thrift.transport.TSaslServerTransport;
 import org.apache.thrift.transport.TServerSocket;
 import org.apache.thrift.transport.TServerTransport;
 import org.apache.thrift.transport.TTransportFactory;
-import org.mortbay.log.Log;
+import org.eclipse.jetty.util.MultiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Sets;
 
 public class SentryService implements Callable {
 
@@ -80,9 +86,11 @@ public class SentryService implements Callable {
   private final String[] principalParts;
   private final String keytab;
   private final ExecutorService serviceExecutor;
-  private Future future;
+  private Future serviceStatus;
   private TServer thriftServer;
   private Status status;
+  private int webServerPort;
+  private SentryWebServer sentryWebServer;
 
   public SentryService(Configuration conf) {
     this.conf = conf;
@@ -90,6 +98,7 @@ public class SentryService implements Callable {
         .getInt(ServerConfig.RPC_PORT, ServerConfig.RPC_PORT_DEFAULT);
     if (port == 0) {
       port = findFreePort();
+      conf.setInt(ServerConfig.RPC_PORT, port);
     }
     this.address = NetUtils.createSocketAddr(
         conf.get(ServerConfig.RPC_ADDRESS, ServerConfig.RPC_ADDRESS_DEFAULT),
@@ -133,6 +142,7 @@ public class SentryService implements Callable {
             + (count++));
       }
     });
+    webServerPort = conf.getInt(ServerConfig.SENTRY_WEB_PORT, ServerConfig.SENTRY_WEB_PORT_DEFAULT);
     status = Status.NOT_STARTED;
   }
 
@@ -140,6 +150,7 @@ public class SentryService implements Callable {
   public String call() throws Exception {
     SentryKerberosContext kerberosContext = null;
     try {
+      status = Status.STARTED;
       if (kerberos) {
         kerberosContext = new SentryKerberosContext(principal, keytab, true);
         Subject.doAs(kerberosContext.getSubject(), new PrivilegedExceptionAction<Void>() {
@@ -180,9 +191,14 @@ public class SentryService implements Callable {
       try {
         Constructor<?> constructor = clazz
             .getConstructor(Configuration.class);
+        LOGGER.info("ProcessorFactory being used: " + clazz.getCanonicalName());
         ProcessorFactory factory = (ProcessorFactory) constructor
             .newInstance(conf);
-        registeredProcessor = factory.register(processor) || registeredProcessor;
+        boolean status = factory.register(processor);
+        if(!status) {
+          LOGGER.error("Failed to register " + clazz.getCanonicalName());
+        }
+        registeredProcessor = status || registeredProcessor;
       } catch (Exception e) {
         throw new IllegalStateException("Could not create "
             + processorFactory, e);
@@ -210,7 +226,28 @@ public class SentryService implements Callable {
         .minWorkerThreads(minThreads).maxWorkerThreads(maxThreads);
     thriftServer = new TThreadPoolServer(args);
     LOGGER.info("Serving on " + address);
+    startSentryWebServer();
     thriftServer.serve();
+  }
+
+  private void startSentryWebServer() throws Exception{
+    Boolean sentryReportingEnable = conf.getBoolean(ServerConfig.SENTRY_WEB_ENABLE,
+        ServerConfig.SENTRY_WEB_ENABLE_DEFAULT);
+    if(sentryReportingEnable) {
+      List<EventListener> listenerList = new ArrayList<EventListener>();
+      listenerList.add(new SentryHealthCheckServletContextListener());
+      listenerList.add(new SentryMetricsServletContextListener());
+      sentryWebServer = new SentryWebServer(listenerList, webServerPort, conf);
+      sentryWebServer.start();
+    }
+
+  }
+
+  private void stopSentryWebServer() throws Exception{
+    if( sentryWebServer != null) {
+      sentryWebServer.stop();
+      sentryWebServer = null;
+    }
   }
 
   public InetSocketAddress getAddress() {
@@ -227,22 +264,61 @@ public class SentryService implements Callable {
       throw new IllegalStateException("Cannot start when " + status);
     }
     LOGGER.info("Attempting to start...");
-    status = Status.STARTED;
-    future = serviceExecutor.submit(this);
+    serviceStatus = serviceExecutor.submit(this);
   }
 
-  public synchronized void stop() {
-    if (status == Status.NOT_STARTED) {
-      return;
-    }
+  public synchronized void stop() throws Exception{
+    MultiException exception = null;
     LOGGER.info("Attempting to stop...");
-
-    if (thriftServer.isServing()) {
-      thriftServer.stop();
+    if (isRunning()) {
+      LOGGER.info("Attempting to stop sentry thrift service...");
+      try {
+        thriftServer.stop();
+        thriftServer = null;
+        status = Status.NOT_STARTED;
+      } catch (Exception e) {
+        LOGGER.error("Error while stopping sentry thrift service", e);
+        exception = addMultiException(exception,e);
+      }
+    } else {
+      thriftServer = null;
+      status = Status.NOT_STARTED;
+      LOGGER.info("Sentry thrift service is already stopped...");
     }
-    thriftServer = null;
-    status = Status.NOT_STARTED;
+    if (isWebServerRunning()) {
+      try {
+        LOGGER.info("Attempting to stop sentry web service...");
+        stopSentryWebServer();
+      } catch (Exception e) {
+        LOGGER.error("Error while stopping sentry web service", e);
+        exception = addMultiException(exception,e);
+      }
+    } else {
+      LOGGER.info("Sentry web service is already stopped...");
+    }
+    if (exception != null) {
+      exception.ifExceptionThrow();
+    }
     LOGGER.info("Stopped...");
+  }
+
+  // wait for the service thread to finish execution
+  public synchronized void waitOnFuture() throws ExecutionException, InterruptedException {
+    LOGGER.info("Waiting on future.get()");
+      serviceStatus.get();
+  }
+
+  private MultiException addMultiException(MultiException exception, Exception e) {
+    if(exception == null){
+      exception = new MultiException();
+    }
+    exception.add(e);
+    return exception;
+  }
+
+  private boolean isWebServerRunning() {
+    return sentryWebServer != null
+        && sentryWebServer.isAlive();
   }
 
   private static int findFreePort() {
@@ -292,9 +368,9 @@ public class SentryService implements Callable {
       File configFile = null;
       if (configFileName == null || commandLine.hasOption("h") || commandLine.hasOption("help")) {
         // print usage
-          HelpFormatter formatter = new HelpFormatter();
-          formatter.printHelp("sentry --command service", options);
-          System.exit(-1);
+        HelpFormatter formatter = new HelpFormatter();
+        formatter.printHelp("sentry --command service", options);
+        System.exit(-1);
       } else if(!((configFile = new File(configFileName)).isFile() && configFile.canRead())) {
         throw new IllegalArgumentException("Cannot read configuration file " + configFile);
       }
@@ -315,8 +391,7 @@ public class SentryService implements Callable {
 
       // Let's wait on the service to stop
       try {
-        LOGGER.info("Waiting on future.get()");
-        server.future.get();
+        server.waitOnFuture();
       } finally {
         server.serviceExecutor.shutdown();
       }
@@ -325,5 +400,23 @@ public class SentryService implements Callable {
 
   public Configuration getConf() {
     return conf;
+  }
+
+  /**
+   * Add Thrift event handler to underlying thrift threadpool server
+   * @param eventHandler
+   */
+  public void setThriftEventHandler(TServerEventHandler eventHandler) throws IllegalStateException {
+    if (thriftServer == null) {
+      throw new IllegalStateException("Server is not initialized or stopped");
+    }
+    thriftServer.setServerEventHandler(eventHandler);
+  }
+
+  public TServerEventHandler getThriftEventHandler() throws IllegalStateException {
+    if (thriftServer == null) {
+      throw new IllegalStateException("Server is not initialized or stopped");
+    }
+    return thriftServer.getEventHandler();
   }
 }

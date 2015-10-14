@@ -34,7 +34,6 @@ public class TestDbCrossDbOps extends TestCrossDbOps {
   }
   @BeforeClass
   public static void setupTestStaticConfiguration() throws Exception{
-    //policy_on_hdfs = true;
     useSentryService = true;
     AbstractTestWithStaticConfiguration.setupTestStaticConfiguration();
   }

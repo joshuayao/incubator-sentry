@@ -18,19 +18,21 @@
 
 package org.apache.sentry.provider.db.service.thrift;
 import static junit.framework.Assert.assertEquals;
-import static org.junit.Assert.assertEquals;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 
 import junit.framework.Assert;
 
 import org.apache.sentry.core.common.ActiveRoleSet;
+import org.apache.sentry.core.common.Authorizable;
 import org.apache.sentry.core.model.db.AccessConstants;
 import org.apache.sentry.core.model.db.Database;
 import org.apache.sentry.core.model.db.Server;
 import org.apache.sentry.core.model.db.Table;
 import org.apache.sentry.service.thrift.SentryServiceIntegrationBase;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.google.common.collect.Lists;
@@ -38,9 +40,13 @@ import com.google.common.collect.Sets;
 
 public class TestSentryServerWithoutKerberos extends SentryServiceIntegrationBase {
 
-  @Override
-  public void beforeSetup() throws Exception {
-    this.kerberos = false;
+  @BeforeClass
+  public static void setup() throws Exception {
+    kerberos = false;
+    beforeSetup();
+    setupConf();
+    startSentryService();
+    afterSetup();
   }
 
   @Test
@@ -77,7 +83,6 @@ public class TestSentryServerWithoutKerberos extends SentryServiceIntegrationBas
     client.grantTablePrivilege(requestorUserName, roleName1, "server", "db2", "table3", "ALL");
     client.grantTablePrivilege(requestorUserName, roleName1, "server", "db2", "table4", "ALL");
 
-
     client.dropRoleIfExists(requestorUserName, roleName2);
     client.createRole(requestorUserName, roleName2);
     client.grantRoleToGroup(requestorUserName, group1, roleName2);
@@ -89,7 +94,13 @@ public class TestSentryServerWithoutKerberos extends SentryServiceIntegrationBas
     client.grantTablePrivilege(requestorUserName, roleName2, "server", "db2", "table4", "ALL");
     client.grantTablePrivilege(requestorUserName, roleName2, "server", "db3", "table5", "ALL");
 
-    Set<TSentryPrivilege> listPrivilegesByRoleName = client.listPrivilegesByRoleName(requestorUserName, roleName2, Lists.newArrayList(new Server("server"), new Database("db1")));
+    Set<TSentryPrivilege> listPrivilegesByRoleName = client.listPrivilegesByRoleName(requestorUserName, roleName2, null);
+    assertEquals("Privilege not assigned to role2 !!", 5, listPrivilegesByRoleName.size());
+
+    listPrivilegesByRoleName = client.listPrivilegesByRoleName(requestorUserName, roleName2, new ArrayList<Authorizable>());
+    assertEquals("Privilege not assigned to role2 !!", 5, listPrivilegesByRoleName.size());
+
+    listPrivilegesByRoleName = client.listPrivilegesByRoleName(requestorUserName, roleName2, Lists.newArrayList(new Server("server"), new Database("db1")));
     assertEquals("Privilege not assigned to role2 !!", 2, listPrivilegesByRoleName.size());
 
     listPrivilegesByRoleName = client.listPrivilegesByRoleName(requestorUserName, roleName2, Lists.newArrayList(new Server("server"), new Database("db2"), new Table("table1")));
@@ -162,4 +173,5 @@ public class TestSentryServerWithoutKerberos extends SentryServiceIntegrationBas
     assertEquals(0, client.listPrivilegesForProvider(requestorUserGroupNames,
             ActiveRoleSet.ALL).size());
   }
+
 }

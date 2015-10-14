@@ -35,6 +35,8 @@ public class sentry_common_serviceConstants {
 
   public static final int TSENTRY_SERVICE_V1 = 1;
 
+  public static final int TSENTRY_SERVICE_V2 = 2;
+
   public static final int TSENTRY_STATUS_OK = 0;
 
   public static final int TSENTRY_STATUS_ALREADY_EXISTS = 1;
@@ -46,5 +48,7 @@ public class sentry_common_serviceConstants {
   public static final int TSENTRY_STATUS_INVALID_INPUT = 4;
 
   public static final int TSENTRY_STATUS_ACCESS_DENIED = 5;
+
+  public static final int TSENTRY_STATUS_THRIFT_VERSION_MISMATCH = 6;
 
 }

@@ -18,17 +18,22 @@
 
 package org.apache.sentry.provider.db.log.util;
 
-import java.util.Iterator;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Set;
 
 import org.apache.sentry.core.model.db.AccessConstants;
-import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleAddGroupsRequest;
-import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleDeleteGroupsRequest;
+import org.apache.sentry.provider.db.generic.service.thrift.TAuthorizable;
 import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleGrantPrivilegeRequest;
 import org.apache.sentry.provider.db.service.thrift.TAlterSentryRoleRevokePrivilegeRequest;
 import org.apache.sentry.provider.db.service.thrift.TSentryGrantOption;
-import org.apache.sentry.provider.db.service.thrift.TSentryGroup;
 import org.apache.sentry.provider.db.service.thrift.TSentryPrivilege;
 import org.apache.sentry.service.thrift.ServiceConstants.PrivilegeScope;
+import org.datanucleus.util.StringUtils;
+
+import com.google.common.annotations.VisibleForTesting;
 
 public class CommandUtil {
 
@@ -40,20 +45,17 @@ public class CommandUtil {
     return "DROP ROLE " + roleName;
   }
 
-  public static String createCmdForRoleAddGroup(
-      TAlterSentryRoleAddGroupsRequest request) {
-    return createCmdForRoleAddOrDeleteGroup(request.getRoleName(),
-        request.getGroupsIterator(), true);
+  public static String createCmdForRoleAddGroup(String roleName, String groups) {
+    return createCmdForRoleAddOrDeleteGroup(roleName, groups, true);
   }
 
-  public static String createCmdForRoleDeleteGroup(
-      TAlterSentryRoleDeleteGroupsRequest request) {
-    return createCmdForRoleAddOrDeleteGroup(request.getRoleName(),
-        request.getGroupsIterator(), false);
+  public static String createCmdForRoleDeleteGroup(String roleName, String groups) {
+    return createCmdForRoleAddOrDeleteGroup(roleName, groups, false);
   }
 
   private static String createCmdForRoleAddOrDeleteGroup(String roleName,
-      Iterator<TSentryGroup> iter, boolean isAddGroup) {
+ String groups,
+      boolean isAddGroup) {
     StringBuilder sb = new StringBuilder();
     if (isAddGroup) {
       sb.append("GRANT ROLE ");
@@ -67,17 +69,8 @@ public class CommandUtil {
       sb.append(" FROM ");
     }
 
-    if (iter != null) {
-      sb.append("GROUP ");
-      boolean commaFlg = false;
-      while (iter.hasNext()) {
-        if (commaFlg) {
-          sb.append(", ");
-        } else {
-          commaFlg = true;
-        }
-        sb.append(iter.next().getGroupName());
-      }
+    if (!StringUtils.isEmpty(groups)) {
+      sb.append("GROUP ").append(groups);
     } else {
       sb = new StringBuilder("Missing group information.");
     }
@@ -87,14 +80,25 @@ public class CommandUtil {
 
   public static String createCmdForGrantPrivilege(
       TAlterSentryRoleGrantPrivilegeRequest request) {
-    return createCmdForGrantOrRevokePrivilege(request.getRoleName(),
-        request.getPrivilege(), true);
+    return createCmdForGrantOrRevokePrivileges(request.getRoleName(),
+        request.getPrivileges(), true);
   }
 
   public static String createCmdForRevokePrivilege(
       TAlterSentryRoleRevokePrivilegeRequest request) {
-    return createCmdForGrantOrRevokePrivilege(request.getRoleName(),
-        request.getPrivilege(), false);
+    return createCmdForGrantOrRevokePrivileges(request.getRoleName(),
+        request.getPrivileges(), false);
+  }
+
+  private static String createCmdForGrantOrRevokePrivileges(String roleName,
+      Set<TSentryPrivilege> privileges, boolean isGrant) {
+    StringBuilder sb = new StringBuilder();
+    if (privileges != null) {
+      for (TSentryPrivilege privilege : privileges) {
+        sb.append(createCmdForGrantOrRevokePrivilege(roleName, privilege, isGrant));
+      }
+    }
+    return sb.toString();
   }
 
   private static String createCmdForGrantOrRevokePrivilege(String roleName,
@@ -142,33 +146,76 @@ public class CommandUtil {
     return sb.toString();
   }
 
-  private static ThreadLocal<String> threadLocalIpAddress = new ThreadLocal<String>() {
-    @Override
-    protected synchronized String initialValue() {
-      return "";
+  public static String createCmdForGrantGMPrivilege(
+      org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleGrantPrivilegeRequest request) {
+    return createCmdForGrantOrRevokeGMPrivilege(request.getRoleName(), request.getPrivilege(), true);
+  }
+
+  public static String createCmdForRevokeGMPrivilege(
+      org.apache.sentry.provider.db.generic.service.thrift.TAlterSentryRoleRevokePrivilegeRequest request) {
+    return createCmdForGrantOrRevokeGMPrivilege(request.getRoleName(), request.getPrivilege(),
+        false);
+  }
+
+  private static String createCmdForGrantOrRevokeGMPrivilege(String roleName,
+      org.apache.sentry.provider.db.generic.service.thrift.TSentryPrivilege privilege,
+      boolean isGrant) {
+    StringBuilder sb = new StringBuilder();
+    if (isGrant) {
+      sb.append("GRANT ");
+    } else {
+      sb.append("REVOKE ");
     }
-  };
 
-  public static void setIpAddress(String ipAddress) {
-    threadLocalIpAddress.set(ipAddress);
-  }
-
-  public static String getIpAddress() {
-    return threadLocalIpAddress.get();
-  }
-
-  private static ThreadLocal<String> threadLocalImpersonator = new ThreadLocal<String>() {
-    @Override
-    protected synchronized String initialValue() {
-      return "";
+    String action = privilege.getAction();
+    if (AccessConstants.ALL.equalsIgnoreCase(action)) {
+      sb.append("ALL");
+    } else {
+      if (action != null) {
+        action = action.toUpperCase();
+      }
+      sb.append(action);
     }
-  };
 
-  public static void setImpersonator(String impersonator) {
-    threadLocalImpersonator.set(impersonator);
+    sb.append(" ON");
+
+    List<TAuthorizable> authorizables = privilege.getAuthorizables();
+    if (authorizables != null) {
+      for (TAuthorizable authorizable : authorizables) {
+        sb.append(" ").append(authorizable.getType()).append(" ").append(authorizable.getName());
+      }
+    }
+
+    if (isGrant) {
+      sb.append(" TO ROLE ");
+    } else {
+      sb.append(" FROM ROLE ");
+    }
+    sb.append(roleName);
+
+    if (privilege.getGrantOption() == org.apache.sentry.provider.db.generic.service.thrift.TSentryGrantOption.TRUE) {
+      sb.append(" WITH GRANT OPTION");
+    }
+
+    return sb.toString();
   }
 
-  public static String getImpersonator() {
-    return threadLocalImpersonator.get();
+  // Check if the given IP is one of the local IP.
+  @VisibleForTesting
+  public static boolean assertIPInAuditLog(String ipInAuditLog) throws Exception {
+    if (ipInAuditLog == null) {
+      return false;
+    }
+    Enumeration<NetworkInterface> netInterfaces = NetworkInterface.getNetworkInterfaces();
+    while (netInterfaces.hasMoreElements()) {
+      NetworkInterface ni = netInterfaces.nextElement();
+      Enumeration<InetAddress> ips = ni.getInetAddresses();
+      while (ips.hasMoreElements()) {
+        if (ipInAuditLog.indexOf(ips.nextElement().getHostAddress()) != -1) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }

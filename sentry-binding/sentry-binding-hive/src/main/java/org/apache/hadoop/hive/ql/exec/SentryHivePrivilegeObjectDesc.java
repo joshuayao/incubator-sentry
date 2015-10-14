@@ -17,6 +17,9 @@
 
 package org.apache.hadoop.hive.ql.exec;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.hadoop.hive.ql.plan.PrivilegeObjectDesc;
 
 public class SentryHivePrivilegeObjectDesc extends PrivilegeObjectDesc {

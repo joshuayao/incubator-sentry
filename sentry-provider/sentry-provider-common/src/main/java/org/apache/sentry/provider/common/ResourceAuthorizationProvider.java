@@ -47,23 +47,23 @@ import com.google.common.collect.Sets;
 public abstract class ResourceAuthorizationProvider implements AuthorizationProvider {
   private static final Logger LOGGER = LoggerFactory
       .getLogger(ResourceAuthorizationProvider.class);
+  private final static ThreadLocal<List<String>> lastFailedPrivileges =
+      new ThreadLocal<List<String>>() {
+        @Override
+        protected List<String> initialValue() {
+          return new ArrayList<String>();
+        }
+      };
 
   private final GroupMappingService groupService;
   private final PolicyEngine policy;
   private final PrivilegeFactory privilegeFactory;
-  private final ThreadLocal<List<String>> lastFailedPrivileges;
 
   public ResourceAuthorizationProvider(PolicyEngine policy,
       GroupMappingService groupService) {
     this.policy = policy;
     this.groupService = groupService;
     this.privilegeFactory = policy.getPrivilegeFactory();
-    this.lastFailedPrivileges = new ThreadLocal<List<String>>() {
-      @Override
-      protected List<String> initialValue() {
-        return new ArrayList<String>();
-      }
-    };
   }
 
   /***
@@ -135,12 +135,13 @@ public abstract class ResourceAuthorizationProvider implements AuthorizationProv
 
   private ImmutableSet<String> appendDefaultDBPriv(ImmutableSet<String> privileges, Authorizable[] authorizables) {
     // Only for switch db
-    if ((authorizables != null)&&(authorizables.length == 3)&&(authorizables[2].getName().equals("+"))) {
+    if ((authorizables != null)&&(authorizables.length == 4)&&(authorizables[2].getName().equals("+"))) {
       if ((privileges.size() == 1) && hasOnlyServerPrivilege(privileges.asList().get(0))) {
         // Assuming authorizable[0] will always be the server
         // This Code is only reachable only when user fires a 'use default'
         // and the user has a privilege on atleast 1 privilized Object
-        String defaultPriv = "Server=" + authorizables[0].getName() + "->Db=default->Table=*->action=select";
+        String defaultPriv = "Server=" + authorizables[0].getName()
+            + "->Db=default->Table=*->Column=*->action=select";
         HashSet<String> newPrivs = Sets.newHashSet(defaultPriv);
         return ImmutableSet.copyOf(newPrivs);
       }

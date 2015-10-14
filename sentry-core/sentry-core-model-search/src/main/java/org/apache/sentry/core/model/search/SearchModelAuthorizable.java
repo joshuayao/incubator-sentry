@@ -21,7 +21,8 @@ import org.apache.sentry.core.common.Authorizable;
 public interface SearchModelAuthorizable extends Authorizable {
 
   public enum AuthorizableType {
-    Collection
+    Collection,
+    Field
   };
 
   public AuthorizableType getAuthzType();

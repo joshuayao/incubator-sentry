@@ -17,10 +17,10 @@
 
 package org.apache.sentry.provider.file;
 
-import static org.apache.sentry.provider.file.PolicyFileConstants.DATABASES;
-import static org.apache.sentry.provider.file.PolicyFileConstants.GROUPS;
-import static org.apache.sentry.provider.file.PolicyFileConstants.ROLES;
-import static org.apache.sentry.provider.file.PolicyFileConstants.USERS;
+import static org.apache.sentry.provider.common.PolicyFileConstants.DATABASES;
+import static org.apache.sentry.provider.common.PolicyFileConstants.GROUPS;
+import static org.apache.sentry.provider.common.PolicyFileConstants.ROLES;
+import static org.apache.sentry.provider.common.PolicyFileConstants.USERS;
 
 import java.io.File;
 import java.util.Collection;
@@ -146,7 +146,6 @@ public class PolicyFile {
             "");
     LOGGER.info("Writing policy file to " + file + ":\n" + contents);
     Files.write(contents, file, Charsets.UTF_8);
-
   }
 
   private String getSection(String name, Map<String, String> mapping) {

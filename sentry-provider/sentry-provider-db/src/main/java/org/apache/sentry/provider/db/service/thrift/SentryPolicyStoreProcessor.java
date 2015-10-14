@@ -21,9 +21,11 @@ package org.apache.sentry.provider.db.service.thrift;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.sentry.SentryUserException;
@@ -33,18 +35,28 @@ import org.apache.sentry.provider.db.SentryAccessDeniedException;
 import org.apache.sentry.provider.db.SentryAlreadyExistsException;
 import org.apache.sentry.provider.db.SentryInvalidInputException;
 import org.apache.sentry.provider.db.SentryNoSuchObjectException;
+import org.apache.sentry.provider.db.SentryPolicyStorePlugin;
+import org.apache.sentry.provider.db.SentryPolicyStorePlugin.SentryPluginException;
+import org.apache.sentry.provider.db.SentryThriftAPIMismatchException;
+import org.apache.sentry.provider.db.log.entity.JsonLogEntity;
 import org.apache.sentry.provider.db.log.entity.JsonLogEntityFactory;
 import org.apache.sentry.provider.db.log.util.Constants;
 import org.apache.sentry.provider.db.service.persistent.CommitContext;
+import org.apache.sentry.provider.db.service.persistent.HAContext;
 import org.apache.sentry.provider.db.service.persistent.SentryStore;
+import org.apache.sentry.provider.db.service.persistent.ServiceRegister;
 import org.apache.sentry.provider.db.service.thrift.PolicyStoreConstants.PolicyStoreServerConfig;
+import org.apache.sentry.service.thrift.ServiceConstants;
+import org.apache.sentry.service.thrift.ServiceConstants.ConfUtilties;
 import org.apache.sentry.service.thrift.ServiceConstants.ServerConfig;
+import org.apache.sentry.service.thrift.ServiceConstants.ThriftConstants;
 import org.apache.sentry.service.thrift.Status;
 import org.apache.sentry.service.thrift.TSentryResponseStatus;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.codahale.metrics.Timer;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
@@ -60,12 +72,18 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
 
   public static final String SENTRY_POLICY_SERVICE_NAME = "SentryPolicyService";
 
+  public static volatile SentryPolicyStoreProcessor instance;
+
   private final String name;
   private final Configuration conf;
   private final SentryStore sentryStore;
   private final NotificationHandlerInvoker notificationHandlerInvoker;
   private final ImmutableSet<String> adminGroups;
   private boolean isReady;
+  SentryMetrics sentryMetrics;
+  private HAContext haContext;
+
+  private List<SentryPolicyStorePlugin> sentryPlugins = new LinkedList<SentryPolicyStorePlugin>();
 
   public SentryPolicyStoreProcessor(String name, Configuration conf) throws Exception {
     super();
@@ -74,16 +92,72 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     this.notificationHandlerInvoker = new NotificationHandlerInvoker(conf,
         createHandlers(conf));
     isReady = false;
-    sentryStore = new SentryStore(conf);
+    if (conf.getBoolean(ServerConfig.SENTRY_HA_ENABLED,
+        ServerConfig.SENTRY_HA_ENABLED_DEFAULT)) {
+      haContext = HAContext.getHAServerContext(conf);
+      sentryStore = new SentryStore(conf);
+      ServiceRegister reg = new ServiceRegister(haContext);
+      reg.regService(conf.get(ServerConfig.RPC_ADDRESS),
+          conf.getInt(ServerConfig.RPC_PORT,ServerConfig.RPC_PORT_DEFAULT));
+    } else {
+      sentryStore = new SentryStore(conf);
+    }
     isReady = true;
     adminGroups = ImmutableSet.copyOf(toTrimedLower(Sets.newHashSet(conf.getStrings(
         ServerConfig.ADMIN_GROUPS, new String[]{}))));
+    Iterable<String> pluginClasses = ConfUtilties.CLASS_SPLITTER
+        .split(conf.get(ServerConfig.SENTRY_POLICY_STORE_PLUGINS,
+            ServerConfig.SENTRY_POLICY_STORE_PLUGINS_DEFAULT).trim());
+    for (String pluginClassStr : pluginClasses) {
+      Class<?> clazz = conf.getClassByName(pluginClassStr);
+      if (!SentryPolicyStorePlugin.class.isAssignableFrom(clazz)) {
+        throw new IllegalArgumentException("Sentry Plugin ["
+            + pluginClassStr + "] is not a "
+            + SentryPolicyStorePlugin.class.getName());
+      }
+      SentryPolicyStorePlugin plugin = (SentryPolicyStorePlugin)clazz.newInstance();
+      plugin.initialize(conf, sentryStore);
+      sentryPlugins.add(plugin);
+    }
+    if (instance == null) {
+      instance = this;
+    }
+    initMetrics();
+  }
+
+  private void initMetrics() {
+    sentryMetrics = SentryMetrics.getInstance();
+    sentryMetrics.addSentryStoreGauges(sentryStore);
+
+    String sentryReporting = conf.get(ServerConfig.SENTRY_REPORTER);
+    if( sentryReporting != null) {
+      SentryMetrics.Reporting reporting;
+      try {
+        reporting = SentryMetrics.Reporting.valueOf(sentryReporting.toUpperCase());
+        sentryMetrics.initReporting(reporting);
+
+      } catch (IllegalArgumentException e) {
+        LOGGER.warn("Metrics reporting not configured correctly, please set " + ServerConfig.SENTRY_REPORTER +
+            " to: " + ServerConfig.SENTRY_REPORTER_CONSOLE + "/" + ServerConfig.SENTRY_REPORTER_JMX);
+      }
+    }
   }
 
   public void stop() {
     if (isReady) {
       sentryStore.stop();
     }
+    if (haContext != null) {
+      try {
+        haContext.getCuratorFramework().close();
+      } catch (Exception e) {
+      }
+    }
+  }
+
+  public void registerPlugin(SentryPolicyStorePlugin plugin) throws SentryPluginException {
+    plugin.initialize(conf, sentryStore);
+    sentryPlugins.add(plugin);
   }
 
   @VisibleForTesting
@@ -147,8 +221,10 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TCreateSentryRoleResponse create_sentry_role(
     TCreateSentryRoleRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.createRoleTimer.time();
     TCreateSentryRoleResponse response = new TCreateSentryRoleResponse();
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(),
           getRequestorGroups(request.getRequestorUserName()));
       CommitContext commitContext = sentryStore.createSentryRole(request.getRoleName());
@@ -162,29 +238,57 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance()
+          .createJsonLogEntity(request, response, conf).toJsonFormatLog());
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for create role: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TAlterSentryRoleGrantPrivilegeResponse alter_sentry_role_grant_privilege
   (TAlterSentryRoleGrantPrivilegeRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.grantTimer.time();
 
     TAlterSentryRoleGrantPrivilegeResponse response = new TAlterSentryRoleGrantPrivilegeResponse();
     try {
-      CommitContext commitContext = sentryStore.alterSentryRoleGrantPrivilege(request.getRequestorUserName(),
-          request.getRoleName(), request.getPrivilege());
+      validateClientVersion(request.getProtocol_version());
+      // There should only one field be set
+      if ( !(request.isSetPrivileges()^request.isSetPrivilege()) ) {
+        throw new SentryUserException("SENTRY API version is not right!");
+      }
+      // Maintain compatibility for old API: Set privilege field to privileges field
+      if (request.isSetPrivilege()) {
+        request.setPrivileges(Sets.newHashSet(request.getPrivilege()));
+      }
+      CommitContext commitContext = sentryStore.alterSentryRoleGrantPrivileges(request.getRequestorUserName(),
+          request.getRoleName(), request.getPrivileges());
       response.setStatus(Status.OK());
-      response.setPrivilege(request.getPrivilege());
+      response.setPrivileges(request.getPrivileges());
+      // Maintain compatibility for old API: Set privilege field to response
+      if (response.isSetPrivileges() && response.getPrivileges().size() == 1) {
+        response.setPrivilege(response.getPrivileges().iterator().next());
+      }
       notificationHandlerInvoker.alter_sentry_role_grant_privilege(commitContext,
           request, response);
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onAlterSentryRoleGrantPrivilege(request);
+      }
     } catch (SentryNoSuchObjectException e) {
       String msg = "Role: " + request.getRoleName() + " doesn't exist.";
       LOGGER.error(msg, e);
@@ -196,35 +300,74 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      Set<JsonLogEntity> jsonLogEntitys = JsonLogEntityFactory.getInstance().createJsonLogEntitys(
+          request, response, conf);
+      for (JsonLogEntity jsonLogEntity : jsonLogEntitys) {
+        AUDIT_LOGGER.info(jsonLogEntity.toJsonFormatLog());
+      }
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for grant privilege to role: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TAlterSentryRoleRevokePrivilegeResponse alter_sentry_role_revoke_privilege
   (TAlterSentryRoleRevokePrivilegeRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.revokeTimer.time();
     TAlterSentryRoleRevokePrivilegeResponse response = new TAlterSentryRoleRevokePrivilegeResponse();
     try {
-      CommitContext commitContext = sentryStore.alterSentryRoleRevokePrivilege(request.getRequestorUserName(),
-          request.getRoleName(), request.getPrivilege());
+      validateClientVersion(request.getProtocol_version());
+      // There should only one field be set
+      if ( !(request.isSetPrivileges()^request.isSetPrivilege()) ) {
+        throw new SentryUserException("SENTRY API version is not right!");
+      }
+      // Maintain compatibility for old API: Set privilege field to privileges field
+      if (request.isSetPrivilege()) {
+        request.setPrivileges(Sets.newHashSet(request.getPrivilege()));
+      }
+      CommitContext commitContext = sentryStore.alterSentryRoleRevokePrivileges(request.getRequestorUserName(),
+          request.getRoleName(), request.getPrivileges());
       response.setStatus(Status.OK());
       notificationHandlerInvoker.alter_sentry_role_revoke_privilege(commitContext,
           request, response);
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onAlterSentryRoleRevokePrivilege(request);
+      }
     } catch (SentryNoSuchObjectException e) {
-      String msg = "Privilege: [server=" + request.getPrivilege().getServerName() +
-    		  ",db=" + request.getPrivilege().getDbName() +
-    		  ",table=" + request.getPrivilege().getTableName() +
-    		  ",URI=" + request.getPrivilege().getURI() +
-    		  ",action=" + request.getPrivilege().getAction() + "] doesn't exist.";
-      LOGGER.error(msg, e);
-      response.setStatus(Status.NoSuchObject(msg, e));
+      StringBuilder msg = new StringBuilder();
+      if (request.getPrivileges().size() > 0) {
+        for (TSentryPrivilege privilege : request.getPrivileges()) {
+          msg.append("Privilege: [server=");
+          msg.append(privilege.getServerName());
+          msg.append(",db=");
+          msg.append(privilege.getDbName());
+          msg.append(",table=");
+          msg.append(privilege.getTableName());
+          msg.append(",URI=");
+          msg.append(privilege.getURI());
+          msg.append(",action=");
+          msg.append(privilege.getAction());
+          msg.append("] ");
+        }
+        msg.append("doesn't exist.");
+      }
+      LOGGER.error(msg.toString(), e);
+      response.setStatus(Status.NoSuchObject(msg.toString(), e));
     } catch (SentryInvalidInputException e) {
       String msg = "Invalid input privilege object";
       LOGGER.error(msg, e);
@@ -232,29 +375,48 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      Set<JsonLogEntity> jsonLogEntitys = JsonLogEntityFactory.getInstance().createJsonLogEntitys(
+          request, response, conf);
+      for (JsonLogEntity jsonLogEntity : jsonLogEntitys) {
+        AUDIT_LOGGER.info(jsonLogEntity.toJsonFormatLog());
+      }
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for revoke privilege from role: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TDropSentryRoleResponse drop_sentry_role(
     TDropSentryRoleRequest request)  throws TException {
+    final Timer.Context timerContext = sentryMetrics.dropRoleTimer.time();
     TDropSentryRoleResponse response = new TDropSentryRoleResponse();
     TSentryResponseStatus status;
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(),
           getRequestorGroups(request.getRequestorUserName()));
       CommitContext commitContext = sentryStore.dropSentryRole(request.getRoleName());
       response.setStatus(Status.OK());
       notificationHandlerInvoker.drop_sentry_role(commitContext,
           request, response);
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onDropSentryRole(request);
+      }
     } catch (SentryNoSuchObjectException e) {
       String msg = "Role :" + request + " does not exist.";
       LOGGER.error(msg, e);
@@ -262,22 +424,35 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance()
+          .createJsonLogEntity(request, response, conf).toJsonFormatLog());
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for drop role: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TAlterSentryRoleAddGroupsResponse alter_sentry_role_add_groups(
     TAlterSentryRoleAddGroupsRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.grantRoleTimer.time();
     TAlterSentryRoleAddGroupsResponse response = new TAlterSentryRoleAddGroupsResponse();
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(),
           getRequestorGroups(request.getRequestorUserName()));
       CommitContext commitContext = sentryStore.alterSentryRoleAddGroups(request.getRequestorUserName(),
@@ -285,6 +460,9 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
       response.setStatus(Status.OK());
       notificationHandlerInvoker.alter_sentry_role_add_groups(commitContext,
           request, response);
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onAlterSentryRoleAddGroups(request);
+      }
     } catch (SentryNoSuchObjectException e) {
       String msg = "Role: " + request + " does not exist.";
       LOGGER.error(msg, e);
@@ -292,22 +470,35 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance()
+          .createJsonLogEntity(request, response, conf).toJsonFormatLog());
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for add role to group: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TAlterSentryRoleDeleteGroupsResponse alter_sentry_role_delete_groups(
     TAlterSentryRoleDeleteGroupsRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.revokeRoleTimer.time();
     TAlterSentryRoleDeleteGroupsResponse response = new TAlterSentryRoleDeleteGroupsResponse();
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(),
           getRequestorGroups(request.getRequestorUserName()));
       CommitContext commitContext = sentryStore.alterSentryRoleDeleteGroups(request.getRoleName(),
@@ -315,6 +506,9 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
       response.setStatus(Status.OK());
       notificationHandlerInvoker.alter_sentry_role_delete_groups(commitContext,
           request, response);
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onAlterSentryRoleDeleteGroups(request);
+      }
     } catch (SentryNoSuchObjectException e) {
       String msg = "Role: " + request + " does not exist.";
       LOGGER.error(msg, e);
@@ -322,26 +516,39 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error adding groups to role: " + request;
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
 
-    AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance().createJsonLogEntity(
-    		request, response, conf).toJsonFormatLog());
+    try {
+      AUDIT_LOGGER.info(JsonLogEntityFactory.getInstance()
+          .createJsonLogEntity(request, response, conf).toJsonFormatLog());
+    } catch (Exception e) {
+      // if any exception, log the exception.
+      String msg = "Error creating audit log for delete role from group: " + e.getMessage();
+      LOGGER.error(msg, e);
+    }
     return response;
   }
 
   @Override
   public TListSentryRolesResponse list_sentry_roles_by_group(
     TListSentryRolesRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.listRolesByGroupTimer.time();
     TListSentryRolesResponse response = new TListSentryRolesResponse();
     TSentryResponseStatus status;
     Set<TSentryRole> roleSet = new HashSet<TSentryRole>();
     String subject = request.getRequestorUserName();
     boolean checkAllGroups = false;
     try {
+      validateClientVersion(request.getProtocol_version());
       Set<String> groups = getRequestorGroups(subject);
       // Don't check admin permissions for listing requestor's own roles
       if (AccessConstants.ALL.equalsIgnoreCase(request.getGroupName())) {
@@ -368,10 +575,15 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
     return response;
   }
@@ -379,11 +591,13 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TListSentryPrivilegesResponse list_sentry_privileges_by_role(
       TListSentryPrivilegesRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.listPrivilegesByRoleTimer.time();
     TListSentryPrivilegesResponse response = new TListSentryPrivilegesResponse();
     TSentryResponseStatus status;
     Set<TSentryPrivilege> privilegeSet = new HashSet<TSentryPrivilege>();
     String subject = request.getRequestorUserName();
     try {
+      validateClientVersion(request.getProtocol_version());
       Set<String> groups = getRequestorGroups(subject);
       Boolean admin = inAdminGroups(groups);
       if(!admin) {
@@ -408,10 +622,15 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
     return response;
   }
@@ -423,9 +642,11 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TListSentryPrivilegesForProviderResponse list_sentry_privileges_for_provider(
       TListSentryPrivilegesForProviderRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.listPrivilegesForProviderTimer.time();
     TListSentryPrivilegesForProviderResponse response = new TListSentryPrivilegesForProviderResponse();
     response.setPrivileges(new HashSet<String>());
     try {
+      validateClientVersion(request.getProtocol_version());
       Set<String> privilegesForProvider = sentryStore.listSentryPrivilegesForProvider(
           request.getGroups(), request.getRoleSet(), request.getAuthorizableHierarchy());
       response.setPrivileges(privilegesForProvider);
@@ -444,10 +665,15 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
         }
       }
       response.setStatus(Status.OK());
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
     return response;
   }
@@ -494,19 +720,29 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TDropPrivilegesResponse drop_sentry_privilege(
       TDropPrivilegesRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.dropPrivilegeTimer.time();
     TDropPrivilegesResponse response = new TDropPrivilegesResponse();
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(), adminGroups);
       sentryStore.dropPrivilege(request.getAuthorizable());
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onDropSentryPrivilege(request);
+      }
       response.setStatus(Status.OK());
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: "
           + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
     return response;
   }
@@ -514,20 +750,30 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TRenamePrivilegesResponse rename_sentry_privilege(
       TRenamePrivilegesRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.renamePrivilegeTimer.time();
     TRenamePrivilegesResponse response = new TRenamePrivilegesResponse();
     try {
+      validateClientVersion(request.getProtocol_version());
       authorize(request.getRequestorUserName(), adminGroups);
       sentryStore.renamePrivilege(request.getOldAuthorizable(),
           request.getNewAuthorizable());
+      for (SentryPolicyStorePlugin plugin : sentryPlugins) {
+        plugin.onRenameSentryPrivilege(request);
+      }
       response.setStatus(Status.OK());
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: "
           + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.close();
     }
     return response;
   }
@@ -535,12 +781,14 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
   @Override
   public TListSentryPrivilegesByAuthResponse list_sentry_privileges_by_authorizable(
       TListSentryPrivilegesByAuthRequest request) throws TException {
+    final Timer.Context timerContext = sentryMetrics.listPrivilegesByAuthorizableTimer.time();
     TListSentryPrivilegesByAuthResponse response = new TListSentryPrivilegesByAuthResponse();
     Map<TSentryAuthorizable, TSentryPrivilegeMap> authRoleMap = Maps.newHashMap();
     String subject = request.getRequestorUserName();
     Set<String> requestedGroups = request.getGroups();
     TSentryActiveRoleSet requestedRoleSet = request.getRoleSet();
     try {
+      validateClientVersion(request.getProtocol_version());
       Set<String> memberGroups = getRequestorGroups(subject);
       if(!inAdminGroups(memberGroups)) {
         // disallow non-admin to lookup groups that they are not part of
@@ -577,16 +825,125 @@ public class SentryPolicyStoreProcessor implements SentryPolicyService.Iface {
       }
       response.setPrivilegesMapByAuth(authRoleMap);
       response.setStatus(Status.OK());
+      // TODO : Sentry - HDFS : Have to handle this
     } catch (SentryAccessDeniedException e) {
       LOGGER.error(e.getMessage(), e);
       response.setStatus(Status.AccessDenied(e.getMessage(), e));
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
     } catch (Exception e) {
       String msg = "Unknown error for request: " + request + ", message: "
           + e.getMessage();
       LOGGER.error(msg, e);
       response.setStatus(Status.RuntimeError(msg, e));
+    } finally {
+      timerContext.stop();
     }
     return response;
   }
 
+  /**
+   * Respond to a request for a config value in the sentry server.  The client
+   * can request any config value that starts with "sentry." and doesn't contain
+   * "keytab".
+   * @param request Contains config parameter sought and default if not found
+   * @return The response, containing the value and status
+   * @throws TException
+   */
+  @Override
+  public TSentryConfigValueResponse get_sentry_config_value(
+          TSentryConfigValueRequest request) throws TException {
+
+    final String requirePattern = "^sentry\\..*";
+    final String excludePattern = ".*keytab.*|.*\\.jdbc\\..*|.*password.*";
+
+    TSentryConfigValueResponse response = new TSentryConfigValueResponse();
+    String attr = request.getPropertyName();
+
+    try {
+      validateClientVersion(request.getProtocol_version());
+    } catch (SentryThriftAPIMismatchException e) {
+      LOGGER.error(e.getMessage(), e);
+      response.setStatus(Status.THRIFT_VERSION_MISMATCH(e.getMessage(), e));
+    }
+    // Only allow config parameters like...
+    if (!Pattern.matches(requirePattern, attr) ||
+        Pattern.matches(excludePattern, attr)) {
+      String msg = "Attempted access of the configuration property " + attr +
+              " was denied";
+      LOGGER.error(msg);
+      response.setStatus(Status.AccessDenied(msg,
+              new SentryAccessDeniedException(msg)));
+      return response;
+    }
+
+    response.setValue(conf.get(attr,request.getDefaultValue()));
+    response.setStatus(Status.OK());
+    return response;
+  }
+
+  @VisibleForTesting
+  static void validateClientVersion(int protocol_version) throws SentryThriftAPIMismatchException {
+    if (ServiceConstants.ThriftConstants.TSENTRY_SERVICE_VERSION_CURRENT != protocol_version) {
+      String msg = "Sentry thrift API protocol version mismatch: Client thrift version " +
+          "is: " + protocol_version + " , server thrift verion " +
+              "is " + ThriftConstants.TSENTRY_SERVICE_VERSION_CURRENT;
+      throw new SentryThriftAPIMismatchException(msg);
+    }
+  }
+
+  // get the sentry mapping data and return the data with map structure
+  @Override
+  public TSentryExportMappingDataResponse export_sentry_mapping_data(
+      TSentryExportMappingDataRequest request) throws TException {
+    TSentryExportMappingDataResponse response = new TSentryExportMappingDataResponse();
+    try {
+      String requestor = request.getRequestorUserName();
+      Set<String> memberGroups = getRequestorGroups(requestor);
+      if (!inAdminGroups(memberGroups)) {
+        // disallow non-admin to import the metadata of sentry
+        throw new SentryAccessDeniedException("Access denied to " + requestor
+            + " for export the metadata of sentry.");
+      }
+      TSentryMappingData tSentryMappingData = new TSentryMappingData();
+      tSentryMappingData.setGroupRolesMap(sentryStore.getGroupNameRoleNamesMap());
+      tSentryMappingData.setRolePrivilegesMap(sentryStore.getRoleNameTPrivilegesMap());
+      response.setMappingData(tSentryMappingData);
+      response.setStatus(Status.OK());
+    } catch (Exception e) {
+      String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
+      LOGGER.error(msg, e);
+      response.setMappingData(new TSentryMappingData());
+      response.setStatus(Status.RuntimeError(msg, e));
+    }
+    return response;
+  }
+
+  // import the sentry mapping data
+  @Override
+  public TSentryImportMappingDataResponse import_sentry_mapping_data(
+      TSentryImportMappingDataRequest request) throws TException {
+    TSentryImportMappingDataResponse response = new TSentryImportMappingDataResponse();
+    try {
+      String requestor = request.getRequestorUserName();
+      Set<String> memberGroups = getRequestorGroups(requestor);
+      if (!inAdminGroups(memberGroups)) {
+        // disallow non-admin to import the metadata of sentry
+        throw new SentryAccessDeniedException("Access denied to " + requestor
+            + " for import the metadata of sentry.");
+      }
+      sentryStore.importSentryMetaData(request.getMappingData(), request.isOverwriteRole());
+      response.setStatus(Status.OK());
+    } catch (SentryInvalidInputException e) {
+      String msg = "Invalid input privilege object";
+      LOGGER.error(msg, e);
+      response.setStatus(Status.InvalidInput(msg, e));
+    } catch (Exception e) {
+      String msg = "Unknown error for request: " + request + ", message: " + e.getMessage();
+      LOGGER.error(msg, e);
+      response.setStatus(Status.RuntimeError(msg, e));
+    }
+    return response;
+  }
 }

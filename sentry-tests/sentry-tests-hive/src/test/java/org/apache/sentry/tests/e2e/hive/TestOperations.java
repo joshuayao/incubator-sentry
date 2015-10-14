@@ -54,6 +54,7 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     privileges.put("select_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=select");
     privileges.put("insert_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=insert");
     privileges.put("alter_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=alter");
+    privileges.put("alter_db1_ptab", "server=server1->db=" + DB1 + "->table=ptab->action=alter");
     privileges.put("index_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=index");
     privileges.put("lock_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=lock");
     privileges.put("drop_db1_tb1", "server=server1->db=" + DB1 + "->table=tb1->action=drop");
@@ -67,7 +68,6 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     policyFile = PolicyFile.setAdminOnServer1(ADMINGROUP)
         .setUserGroupMapping(StaticUserGroup.getStaticMapping());
     writePolicyFile(policyFile);
-
   }
 
   private void adminCreate(String db, String table) throws Exception{
@@ -447,7 +447,8 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     adminCreate(DB1, tableName, true);
     policyFile
         .addPermissionsToRole("alter_db1_tb1", privileges.get("alter_db1_tb1"))
-        .addRolesToGroup(USERGROUP1, "alter_db1_tb1")
+        .addPermissionsToRole("alter_db1_ptab", privileges.get("alter_db1_ptab"))
+        .addRolesToGroup(USERGROUP1, "alter_db1_tb1", "alter_db1_ptab")
         .addPermissionsToRole("insert_db1_tb1", privileges.get("insert_db1_tb1"))
         .addRolesToGroup(USERGROUP2, "insert_db1_tb1");
     writePolicyFile(policyFile);
@@ -460,7 +461,7 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     statement.execute("Use " + DB1);
     statement.execute("ALTER TABLE tb1 ADD IF NOT EXISTS PARTITION (b = '10') ");
     statement.execute("ALTER TABLE tb1 ADD IF NOT EXISTS PARTITION (b = '1') ");
-
+    statement.execute("CREATE TABLE ptab (a int) STORED AS PARQUET");
     //Negative test cases
     connection = context.createConnection(USER2_1);
     statement = context.createStatement(connection);
@@ -484,7 +485,8 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
 
     assertSemanticException(statement, "ALTER TABLE tb1 CHANGE COLUMN a c int");
     assertSemanticException(statement, "ALTER TABLE tb1 ADD COLUMNS (a int)");
-    assertSemanticException(statement, "ALTER TABLE tb1 REPLACE COLUMNS (a int, c int)");
+    assertSemanticException(statement, "ALTER TABLE ptab REPLACE COLUMNS (a int, c int)");
+    assertSemanticException(statement, "MSCK REPAIR TABLE tb1");
 
     //assertSemanticException(statement, "ALTER VIEW view1 SET TBLPROPERTIES ('comment' = 'new_comment')");
 
@@ -515,7 +517,8 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
 
     statement.execute("ALTER TABLE tb1 CHANGE COLUMN a c int");
     statement.execute("ALTER TABLE tb1 ADD COLUMNS (a int)");
-    statement.execute("ALTER TABLE tb1 REPLACE COLUMNS (a int, c int)");
+    statement.execute("ALTER TABLE ptab REPLACE COLUMNS (a int, c int)");
+    statement.execute("MSCK REPAIR TABLE tb1");
 
     //statement.execute("ALTER VIEW view1 SET TBLPROPERTIES ('comment' = 'new_comment')");
 
@@ -894,6 +897,8 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     adminCreate(DB1, tableName);
     adminCreate(DB2, null);
 
+    String location = dfs.getBaseDir() + "/" + Math.random();
+
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
     statement.execute("Use " + DB1);
@@ -902,19 +907,27 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     connection.close();
 
     policyFile
-        .addPermissionsToRole("select_db1_tb1", privileges.get("select_db1_tb1"))
-        .addPermissionsToRole("select_db1_view1", privileges.get("select_db1_view1"))
-        .addPermissionsToRole("create_db2", privileges.get("create_db2"))
-        .addRolesToGroup(USERGROUP1, "select_db1_tb1", "create_db2")
-        .addRolesToGroup(USERGROUP2, "select_db1_view1", "create_db2");
+      .addPermissionsToRole("select_db1_tb1", privileges.get("select_db1_tb1"))
+      .addPermissionsToRole("select_db1_view1", privileges.get("select_db1_view1"))
+      .addPermissionsToRole("create_db2", privileges.get("create_db2"))
+      .addPermissionsToRole("all_uri", "server=server1->uri=" + location)
+      .addRolesToGroup(USERGROUP1, "select_db1_tb1", "create_db2")
+      .addRolesToGroup(USERGROUP2, "select_db1_view1", "create_db2")
+      .addRolesToGroup(USERGROUP3, "select_db1_tb1", "create_db2,all_uri");
     writePolicyFile(policyFile);
 
     connection = context.createConnection(USER1_1);
     statement = context.createStatement(connection);
     statement.execute("Use " + DB2);
-    statement.execute("create table tb2 as select a from " + DB1 + ".tb1" );
+    statement.execute("create table tb2 as select a from " + DB1 + ".tb1");
+    //Ensure CTAS fails without URI
+    context.assertSentrySemanticException(statement, "create table tb3 location '" + location +
+        "' as select a from " + DB1 + ".tb1",
+      semanticException);
     context.assertSentrySemanticException(statement, "create table tb3 as select a from " + DB1 + ".view1",
-        semanticException);
+      semanticException);
+
+
     statement.close();
     connection.close();
 
@@ -923,11 +936,23 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     statement.execute("Use " + DB2);
     statement.execute("create table tb3 as select a from " + DB1 + ".view1" );
     context.assertSentrySemanticException(statement, "create table tb4 as select a from " + DB1 + ".tb1",
-        semanticException);
+      semanticException);
 
     statement.close();
     connection.close();
+
+    connection = context.createConnection(USER3_1);
+    statement = context.createStatement(connection);
+    //CTAS is valid with URI
+    statement.execute("Use " + DB2);
+    statement.execute("create table tb4 location '" + location +
+      "' as select a from " + DB1 + ".tb1");
+
+    statement.close();
+    connection.close();
+
   }
+
 
   /*
   1. INSERT : IP: select on table, OP: insert on table + all on uri(optional)
@@ -1002,6 +1027,8 @@ public class TestOperations extends AbstractTestWithStaticConfiguration {
     Statement statement = context.createStatement(connection);
     assertSemanticException(statement, "create external table " + DB1 + ".tb1(a int) stored as " +
         "textfile location 'file:" + externalTblDir.getAbsolutePath() + "'");
+    //Create external table on HDFS
+    assertSemanticException(statement, "create external table " + DB1 + ".tb2(a int) location '/user/hive/warehouse/blah'");
     statement.close();
     connection.close();
 

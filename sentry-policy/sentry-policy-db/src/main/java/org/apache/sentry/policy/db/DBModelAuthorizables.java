@@ -17,13 +17,14 @@
 package org.apache.sentry.policy.db;
 
 import org.apache.sentry.core.model.db.AccessURI;
+import org.apache.sentry.core.model.db.Column;
 import org.apache.sentry.core.model.db.DBModelAuthorizable;
 import org.apache.sentry.core.model.db.DBModelAuthorizable.AuthorizableType;
 import org.apache.sentry.core.model.db.Database;
 import org.apache.sentry.core.model.db.Server;
 import org.apache.sentry.core.model.db.Table;
 import org.apache.sentry.core.model.db.View;
-import org.apache.sentry.provider.file.KeyValue;
+import org.apache.sentry.provider.common.KeyValue;
 
 public class DBModelAuthorizables {
 
@@ -55,6 +56,8 @@ public class DBModelAuthorizables {
       return new Table(name);
     case View:
       return new View(name);
+    case Column:
+      return new Column(name);
     case URI:
       return new AccessURI(name);
     default:

@@ -53,49 +53,15 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
   public static void setupTestStaticConfiguration() throws Exception{
     useSentryService = true;
     AbstractTestWithStaticConfiguration.setupTestStaticConfiguration();
+    AbstractTestWithStaticConfiguration.setupAdmin();
   }
 
-  /**
-   * This test is only used for manual testing of beeline with Sentry Service
-   * @throws Exception
-   */
-  @Override
-  @After
-  public void clearDB() throws Exception {
-    Connection connection;
-    Statement statement;
-    connection = context.createConnection(ADMIN1);
-    statement = context.createStatement(connection);
-    ResultSet resultSet;
-    resultSet = statement.executeQuery("SHOW roles");
-    List<String> roles = new ArrayList<String>();
-    while ( resultSet.next()) {
-      roles.add(resultSet.getString(1));
-    }
-    for(String role:roles) {
-      statement.execute("DROP Role " + role);
-    }
 
-    statement.close();
-    connection.close();
-    if (context != null) {
-      context.close();
-    }
-  }
-
-  @Ignore
-  @Test
-  public void beelineTest() throws Exception{
-    while(true) {}
-  }
 
   @Test
   public void testBasic() throws Exception {
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
-    statement.execute("CREATE ROLE admin_role");
-    statement.execute("GRANT ALL ON DATABASE default TO ROLE admin_role");
-    statement.execute("GRANT ROLE admin_role TO GROUP " + ADMINGROUP);
     statement.execute("DROP TABLE t1");
     statement.execute("CREATE TABLE t1 (c1 string)");
     statement.execute("CREATE ROLE user_role");
@@ -122,10 +88,11 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     connection.close();
   }
 
-
-  // SENTRY-303 tests
+  /**
+   * Regression test for SENTRY-303 and SENTRY-543.
+   */
   @Test
-  public void testGrantSELECTonDb() throws Exception {
+  public void testGrantRevokeSELECTonDb() throws Exception {
     File dataFile = doSetupForGrantDbTests();
 
     Connection connection = context.createConnection(ADMIN1);
@@ -154,6 +121,36 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
       // INSERT is not allowed
       statement.execute("LOAD DATA LOCAL INPATH '" + dataFile.getPath() + "' INTO TABLE " + DB1 + ".t2");
       assertTrue("only SELECT allowed on t2!!", false);
+    } catch (Exception e) {
+      // Ignore
+    }
+
+    connection = context.createConnection(ADMIN1);
+    statement = context.createStatement(connection);
+
+    // SENTRY-543 - Verify recursive revoke of SELECT on database removes the correct
+    // privileges.
+    statement.execute("USE " + DB1);
+    statement.execute("GRANT ALL ON TABLE t1 TO ROLE user_role");
+    statement.execute("REVOKE SELECT ON DATABASE " + DB1 + " FROM ROLE user_role");
+    statement.close();
+    connection.close();
+
+    // Switch to user1 - they should not have no access on t1 and t2 now.
+    connection = context.createConnection(USER1_1);
+    statement = context.createStatement(connection);
+
+    try {
+      // SELECT is not allowed
+      statement.execute("SELECT * FROM " + DB1 + ".t1");
+      fail("SELECT should have been revoked from t1");
+    } catch (Exception e) {
+      // Ignore
+    }
+    try {
+      // SELECT is not allowed
+      statement.execute("SELECT * FROM " + DB1 + ".t2");
+      fail("SELECT should have been revoked from t2");
     } catch (Exception e) {
       // Ignore
     }
@@ -198,8 +195,22 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     connection.close();
   }
 
+  @Test
+  public void testGrantDuplicateonDb() throws Exception {
+
+    Connection connection = context.createConnection(ADMIN1);
+    Statement statement = context.createStatement(connection);
+    statement.execute("CREATE ROLE user_role");
+
+    // Grant only SELECT on Database
+    statement.execute("GRANT SELECT ON DATABASE db1 TO ROLE user_role");
+    statement.execute("GRANT SELECT ON DATABASE DB1 TO ROLE user_role");
+    statement.execute("GRANT SELECT ON DATABASE Db1 TO ROLE user_role");
+    statement.close();
+    connection.close();
+  }
+
   private File doSetupForGrantDbTests() throws Exception {
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -273,7 +284,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     ResultSet resultSet = statement.executeQuery("SHOW GRANT ROLE user_role");
     assertResultSize(resultSet, 2);
     statement.close();
-    connection.close();;
+    connection.close();
 
     // Revoke on Server
     connection = context.createConnection(ADMIN1);
@@ -317,7 +328,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    * @throws Exception
    */
   private void doSetup() throws Exception {
-    super.setupAdmin();
 
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
@@ -361,7 +371,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
 
   @Test
   public void testRevokeFailAnotherRoleExist() throws Exception {
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -462,7 +471,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
 
   @Test
   public void testRevokeFailMultipleGrantsExist() throws Exception {
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -544,7 +552,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    */
   @Test
   public void testRevokeAllOnServer() throws Exception{
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -631,7 +638,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    */
   @Test
   public void testRevokeAllOnDb() throws Exception{
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -713,7 +719,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    */
   @Test
   public void testRevokeAllOnTable() throws Exception{
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -794,7 +799,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    */
   @Test
   public void testRevokeSELECTOnTable() throws Exception{
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -874,7 +878,6 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
    */
   @Test
   public void testRevokeINSERTOnTable() throws Exception{
-    super.setupAdmin();
 
     //copy data file to test dir
     File dataDir = context.getDataDir();
@@ -972,6 +975,8 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
 
     //Grant/Revoke All on server by admin
     statement.execute("GRANT ALL ON SERVER server1 to role role1");
+    statement.execute("GRANT Role role1 to group " + ADMINGROUP);
+    statement.execute("Create table tab1(col1 int)");
     resultSet = statement.executeQuery("SHOW GRANT ROLE role1");
     assertResultSize(resultSet, 1);
     while(resultSet.next()) {
@@ -1101,6 +1106,29 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     resultSet = statement.executeQuery("SHOW GRANT ROLE role1");
     assertResultSize(resultSet, 0);
 
+
+    //Grant/Revoke SELECT on column by admin
+    statement.execute("GRANT SELECT(col1) ON TABLE tab1 to role role1");
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1");
+    assertResultSize(resultSet, 1);
+    while(resultSet.next()) {
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("tab1"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("col1"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("False")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+
+    statement.execute("REVOKE SELECT(col1) ON TABLE tab1 from role role1");
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1");
+    assertResultSize(resultSet, 0);
+
     //Revoke Partial privilege on table by admin
     statement.execute("GRANT ALL ON TABLE tab1 to role role1");
     resultSet = statement.executeQuery("SHOW GRANT ROLE role1");
@@ -1143,6 +1171,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
       assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
 
     }
+
     statement.close();
     connection.close();
   }
@@ -1165,10 +1194,10 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     Statement statement = context.createStatement(connection);
     statement.execute("CREATE ROLE role1");
     ResultSet resultSet = statement.executeQuery("SHOW roles");
-    assertResultSize(resultSet, 1);
+    assertResultSize(resultSet, 2);
     statement.execute("DROP ROLE role1");
     resultSet = statement.executeQuery("SHOW roles");
-    assertResultSize(resultSet, 0);
+    assertResultSize(resultSet, 1);
   }
 
   /**
@@ -1313,7 +1342,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     Connection connection = context.createConnection(ADMIN1);
     Statement statement = context.createStatement(connection);
     ResultSet resultSet = statement.executeQuery("SHOW ROLES");
-    assertResultSize(resultSet, 0);
+    assertResultSize(resultSet, 1);
     statement.execute("CREATE ROLE role1");
     statement.execute("CREATE ROLE role2");
     resultSet = statement.executeQuery("SHOW ROLES");
@@ -1325,7 +1354,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     while ( resultSet.next()) {
       roles.add(resultSet.getString(1));
     }
-    assertThat(roles.size(), is(2));
+    assertThat(roles.size(), is(3));
     assertTrue(roles.contains("role1"));
     assertTrue(roles.contains("role2"));
     statement.close();
@@ -1349,9 +1378,9 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     statement.execute("CREATE ROLE role1");
     statement.execute("CREATE ROLE role2");
     statement.execute("CREATE ROLE role3");
-    statement.execute("GRANT ROLE role1 to GROUP " + ADMINGROUP);
+    statement.execute("GRANT ROLE role1 to GROUP " + USERGROUP1);
 
-    ResultSet resultSet = statement.executeQuery("SHOW ROLE GRANT GROUP " + ADMINGROUP);
+    ResultSet resultSet = statement.executeQuery("SHOW ROLE GRANT GROUP " + USERGROUP1);
     ResultSetMetaData resultSetMetaData = resultSet.getMetaData();
     assertThat(resultSetMetaData.getColumnCount(), is(4));
     assertThat(resultSetMetaData.getColumnName(1), equalToIgnoringCase("role"));
@@ -1495,6 +1524,141 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
   }
 
   /**
+   * SHOW GRANT ROLE roleName ON COLUMN colName
+   * @throws Exception
+   */
+  @Test
+  public void testShowPrivilegesByRoleOnObjectGivenColumn() throws Exception {
+    Connection connection = context.createConnection(ADMIN1);
+    Statement statement = context.createStatement(connection);
+    statement.execute("CREATE ROLE role1");
+    statement.execute("GRANT SELECT (c1) ON TABLE t1 TO ROLE role1");
+    statement.execute("GRANT SELECT (c2) ON TABLE t2 TO ROLE role1");
+    statement.execute("GRANT SELECT (c1,c2) ON TABLE t3 TO ROLE role1");
+    statement.execute("GRANT SELECT (c1,c2) ON TABLE t4 TO ROLE role1 with grant option");
+
+    //On column - positive
+    ResultSet resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t1 (c1)");
+    int rowCount = 0 ;
+    while ( resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t1"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c1"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("False")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t2 (c2)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t2"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c2"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("False")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t3 (c1)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t3"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c1"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("False")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t3 (c2)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t3"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c2"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("False")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t4 (c1)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t4"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c1"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("True")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t4 (c2)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+      assertThat(resultSet.getString(1), equalToIgnoringCase("default"));
+      assertThat(resultSet.getString(2), equalToIgnoringCase("t4"));
+      assertThat(resultSet.getString(3), equalToIgnoringCase(""));//partition
+      assertThat(resultSet.getString(4), equalToIgnoringCase("c2"));//column
+      assertThat(resultSet.getString(5), equalToIgnoringCase("role1"));//principalName
+      assertThat(resultSet.getString(6), equalToIgnoringCase("role"));//principalType
+      assertThat(resultSet.getString(7), equalToIgnoringCase("select"));
+      assertThat(resultSet.getBoolean(8), is(new Boolean("True")));//grantOption
+      //Create time is not tested
+      //assertThat(resultSet.getLong(9), is(new Long(0)));
+      assertThat(resultSet.getString(10), equalToIgnoringCase("--"));//grantor
+    }
+    assertThat(rowCount, is(1));
+    //On column - negative
+    resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t1 (c2)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+    }
+    assertThat(rowCount, is(0));
+       resultSet = statement.executeQuery("SHOW GRANT ROLE role1 ON TABLE t2 (c1)");
+    rowCount = 0 ;
+    while (resultSet.next()) {
+      rowCount++;
+    }
+    assertThat(rowCount, is(0));
+
+    statement.close();
+    connection.close();
+  }
+
+  /**
    * SHOW GRANT ROLE roleName ON TABLE tableName
    * @throws Exception
    */
@@ -1535,7 +1699,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
   }
 
     /**
-     * SHOW GRANT ROLE roleName ON TABLE tableName
+     * SHOW GRANT ROLE roleName ON DATABASE databaseName
      * @throws Exception
      */
   @Test
@@ -1591,7 +1755,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
   }
 
   /**
-   * SHOW GRANT ROLE roleName ON TABLE tableName
+   * SHOW GRANT ROLE roleName ON SERVER serverName
    * @throws Exception
    */
   @Test
@@ -1638,7 +1802,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
   }
 
   /**
-   * SHOW GRANT ROLE roleName ON DATABASE dbName: Needs Hive patch
+   * SHOW GRANT ROLE roleName ON URI uriName: Needs Hive patch
    * @throws Exception
    */
   @Ignore
@@ -1710,7 +1874,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
     statement.execute("GRANT ROLE " + testRole2 + " TO GROUP " + USERGROUP1);
 
     ResultSet resultSet = statement.executeQuery("SHOW CURRENT ROLES");
-    assertResultSize(resultSet, 2);
+    assertResultSize(resultSet, 3);
 
     statement.execute("SET ROLE " + testRole1);
     resultSet = statement.executeQuery("SHOW CURRENT ROLES");
@@ -1812,7 +1976,7 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
 
     ResultSet resultSet;
     resultSet = statement.executeQuery("SHOW ROLE GRANT GROUP " + ADMINGROUP);
-    assertResultSize(resultSet, 1);
+    assertResultSize(resultSet, 2);
 
     context.assertSentryException(statement, "SHOW ROLE GRANT GROUP Admin",
         SentryNoSuchObjectException.class.getSimpleName());
@@ -1822,4 +1986,154 @@ public class TestDatabaseProvider extends AbstractTestWithStaticConfiguration {
 
   }
 
+  /**
+   * Regression test for SENTRY-617.
+   */
+  @Test
+  public void testGrantRevokeRoleToGroups() throws Exception {
+    Connection connection = context.createConnection(ADMIN1);
+    Statement statement = context.createStatement(connection);
+    statement.execute("DROP DATABASE IF EXISTS " + DB1 + " CASCADE");
+    statement.execute("CREATE DATABASE " + DB1);
+    statement.execute("USE " + DB1);
+    statement.execute("DROP TABLE IF EXISTS t1");
+    statement.execute("CREATE TABLE t1 (c1 string)");
+    statement.execute("CREATE ROLE user_role");
+    statement.execute("GRANT ALL ON TABLE t1 TO ROLE user_role");
+
+    // grant role to group user_group1, group user_group2, user_group3
+    statement.execute("GRANT ROLE user_role TO GROUP " + USERGROUP1
+        + ", GROUP " + USERGROUP2 + ", GROUP " + USERGROUP3);
+
+    // user1, user2, user3 should have permission to access table t1
+    connection = context.createConnection(USER1_1);
+    statement = context.createStatement(connection);
+    statement.execute("SELECT * FROM " + DB1 + ".t1");
+    connection = context.createConnection(USER2_1);
+    statement = context.createStatement(connection);
+    statement.execute("SELECT * FROM " + DB1 + ".t1");
+    connection = context.createConnection(USER3_1);
+    statement = context.createStatement(connection);
+    statement.execute("SELECT * FROM " + DB1 + ".t1");
+
+    // revoke role from group user_group1, group user_group2
+    connection = context.createConnection(ADMIN1);
+    statement = context.createStatement(connection);
+    statement.execute("REVOKE ROLE user_role FROM GROUP " + USERGROUP1
+        + ", GROUP " + USERGROUP2);
+
+    connection = context.createConnection(USER1_1);
+    statement = context.createStatement(connection);
+    try {
+      // INSERT is not allowed
+      statement.execute("SELECT * FROM " + DB1 + ".t1");
+      assertTrue("after revoking, user1 has no permission to access table t1", false);
+    } catch (Exception e) {
+      // Ignore
+    }
+
+    connection = context.createConnection(USER2_1);
+    statement = context.createStatement(connection);
+    try {
+      // INSERT is not allowed
+      statement.execute("SELECT * FROM " + DB1 + ".t1");
+      assertTrue("after revoking, user1 has no permission to access table t1", false);
+    } catch (Exception e) {
+      // Ignore
+    }
+
+    // user3 still has permission to access table t1
+    connection = context.createConnection(USER3_1);
+    statement = context.createStatement(connection);
+    statement.execute("SELECT * FROM " + DB1 + ".t1");
+
+    statement.close();
+    connection.close();
+  }
+
+  /*  SENTRY-827 */
+  @Test
+  public void serverActions() throws Exception {
+    String[] dbs = {DB1, DB2};
+    String tbl = TBL1;
+
+    //To test Insert
+    File dataDir = context.getDataDir();
+    File dataFile = new File(dataDir, SINGLE_TYPE_DATA_FILE_NAME);
+    FileOutputStream to = new FileOutputStream(dataFile);
+    Resources.copy(Resources.getResource(SINGLE_TYPE_DATA_FILE_NAME), to);
+    to.close();
+
+    //setup roles and group mapping
+    Connection connection = context.createConnection(ADMIN1);
+    Statement statement = context.createStatement(connection);
+
+    statement.execute("CREATE ROLE server_all");
+    statement.execute("CREATE ROLE server_select");
+    statement.execute("CREATE ROLE server_insert");
+
+    statement.execute("GRANT ALL ON SERVER server1 to ROLE server_all");
+    statement.execute("GRANT SELECT ON SERVER server1 to ROLE server_select");
+    statement.execute("GRANT INSERT ON SERVER server1 to ROLE server_insert");
+    statement.execute("GRANT ALL ON URI 'file://" + dataFile.getPath() + "' TO ROLE server_select");
+    statement.execute("GRANT ALL ON URI 'file://" + dataFile.getPath() + "' TO ROLE server_insert");
+
+    statement.execute("GRANT ROLE server_all to GROUP " + ADMINGROUP);
+    statement.execute("GRANT ROLE server_select to GROUP " + USERGROUP1);
+    statement.execute("GRANT ROLE server_insert to GROUP " + USERGROUP2);
+
+    for (String db : dbs) {
+      statement.execute("CREATE DATABASE IF NOT EXISTS " + db);
+      statement.execute("CREATE TABLE IF NOT EXISTS " + db + "." + tbl + "(a String)");
+    }
+    statement.close();
+    connection.close();
+
+    connection = context.createConnection(USER1_1);
+    statement = context.createStatement(connection);
+    //Test SELECT, ensure INSERT fails
+    for (String db : dbs) {
+      statement.execute("SELECT * FROM " + db + "." + tbl);
+      try{
+        statement.execute("LOAD DATA LOCAL INPATH '" + dataFile.getPath() +
+          "' INTO TABLE " + db + "." + tbl);
+        assertTrue("INSERT should not be capable here:",true);
+        }catch(SQLException e){}
+      }
+    statement.close();
+    connection.close();
+
+    connection = context.createConnection(USER2_1);
+    statement = context.createStatement(connection);
+    //Test INSERT, ensure SELECT fails
+    for (String db : dbs){
+      statement.execute("LOAD DATA LOCAL INPATH '" + dataFile.getPath() +
+        "' INTO TABLE " + db + "." + tbl);
+      try{
+        statement.execute("SELECT * FROM " + db + "." + tbl);
+      }catch(SQLException e){}
+    }
+
+    statement.close();
+    connection.close();
+
+    //Enusre revoke worked
+    connection = context.createConnection(ADMIN1);
+    statement = context.createStatement(connection);
+    statement.execute("REVOKE SELECT ON SERVER server1 from ROLE server_select");
+
+    statement.close();
+    connection.close();
+
+    connection = context.createConnection(USER1_1);
+    statement = context.createStatement(connection);
+
+    try {
+      statement.execute("SELECT * FROM " + dbs[0] + "." + tbl);
+      assertTrue("Revoke Select on server Failed", false);
+    } catch (SQLException e) {}
+
+    statement.close();
+    connection.close();
+  }
 }

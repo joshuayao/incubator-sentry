@@ -51,8 +51,9 @@ public class HiveAuthzPrivileges {
     SERVER,
     DATABASE,
     TABLE,
-    URI,
-    CONNECT
+    FUNCTION,
+    CONNECT,
+    COLUMN
   }
 
   public static enum HiveExtendedOperation {

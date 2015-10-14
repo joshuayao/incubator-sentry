@@ -17,19 +17,23 @@
 package org.apache.sentry.provider.common;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.Groups;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.collect.Lists;
+
 public class HadoopGroupMappingService implements GroupMappingService {
 
   private static final Logger LOGGER = LoggerFactory
       .getLogger(HadoopGroupMappingService.class);
+  private static Configuration hadoopConf;
   private final Groups groups;
 
   public HadoopGroupMappingService(Groups groups) {
@@ -37,16 +41,32 @@ public class HadoopGroupMappingService implements GroupMappingService {
   }
 
   public HadoopGroupMappingService(Configuration conf, String resource) {
-    this(Groups.getUserToGroupsMappingService(conf));
+    if (hadoopConf == null) {
+      synchronized (HadoopGroupMappingService.class) {
+        if (hadoopConf == null) {
+          // clone the current config and add resource path
+          hadoopConf = new Configuration();
+          hadoopConf.addResource(conf);
+          if (!StringUtils.isEmpty(resource)) {
+            hadoopConf.addResource(resource);
+          }
+        }
+      }
+    }
+    this.groups = Groups.getUserToGroupsMappingService(hadoopConf);
   }
 
   @Override
   public Set<String> getGroups(String user) {
+    List<String> groupList = Lists.newArrayList();
     try {
-      return new HashSet<String>(groups.getGroups(user));
+      groupList = groups.getGroups(user);
     } catch (IOException e) {
-      LOGGER.warn("Unable to obtain groups for " + user, e);
+      throw new SentryGroupNotFoundException("Unable to obtain groups for " + user, e);
     }
-    return Collections.emptySet();
+    if (groupList == null || groupList.isEmpty()) {
+      throw new SentryGroupNotFoundException("Unable to obtain groups for " + user);
+    }
+    return new HashSet<String>(groupList);
   }
 }

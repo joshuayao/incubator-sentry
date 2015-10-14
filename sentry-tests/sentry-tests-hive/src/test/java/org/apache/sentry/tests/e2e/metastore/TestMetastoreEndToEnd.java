@@ -23,10 +23,14 @@ import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Map;
 
 import junit.framework.Assert;
 
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.MetaException;
@@ -38,9 +42,11 @@ import org.apache.sentry.tests.e2e.hive.StaticUserGroup;
 import org.apache.sentry.tests.e2e.hive.hiveserver.HiveServerFactory;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.io.Resources;
 
 public class TestMetastoreEndToEnd extends
@@ -57,30 +63,21 @@ public class TestMetastoreEndToEnd extends
   private static final String tab2_read_role = "tab2_read_role";
   private static final String tabName1 = "tab1";
   private static final String tabName2 = "tab2";
+  private static final String tabName3 = "tab3";
 
+  @BeforeClass
+  public static void setupTestStaticConfiguration() throws Exception {
+    setMetastoreListener = false;
+    AbstractMetastoreTestWithStaticConfiguration.setupTestStaticConfiguration();
+  }
+
+  @Override
   @Before
   public void setup() throws Exception {
-    policyFile = setAdminOnServer1(ADMINGROUP); // PolicyFile.setAdminOnServer1(ADMINGROUP);
-    policyFile
-        .addRolesToGroup(USERGROUP1, db_all_role)
-        .addRolesToGroup(USERGROUP2, "read_db_role")
-        .addRolesToGroup(USERGROUP2, tab1_all_role)
-        .addRolesToGroup(USERGROUP2, tab2_all_role)
-        .addRolesToGroup(USERGROUP3, tab1_read_role)
-        .addRolesToGroup(USERGROUP3, tab2_read_role)
-        .addPermissionsToRole(db_all_role, "server=server1->db=" + dbName)
-        .addPermissionsToRole("read_db_role",
-            "server=server1->db=" + dbName + "->action=SELECT")
-        .addPermissionsToRole(tab1_all_role,
-            "server=server1->db=" + dbName + "->table=" + tabName1)
-        .addPermissionsToRole(tab2_all_role,
-            "server=server1->db=" + dbName + "->table=" + tabName2)
-        .addPermissionsToRole(tab1_read_role,
-            "server=server1->db=" + dbName + "->table=" + tabName1 + "->action=SELECT")
-        .addPermissionsToRole(tab2_read_role,
-            "server=server1->db=" + dbName + "->table=" + tabName2 + "->action=SELECT")
-        .setUserGroupMapping(StaticUserGroup.getStaticMapping());
+    policyFile = setAdminOnServer1(ADMINGROUP);
+    policyFile.setUserGroupMapping(StaticUserGroup.getStaticMapping());
     writePolicyFile(policyFile);
+    super.setup();
 
     dataFile = new File(dataDir, SINGLE_TYPE_DATA_FILE_NAME);
     FileOutputStream to = new FileOutputStream(dataFile);
@@ -92,6 +89,26 @@ public class TestMetastoreEndToEnd extends
     createMetastoreDB(client, dbName);
     client.close();
 
+    policyFile
+            .addRolesToGroup(USERGROUP1, db_all_role)
+            .addRolesToGroup(USERGROUP2, "read_db_role")
+            .addRolesToGroup(USERGROUP2, tab1_all_role)
+            .addRolesToGroup(USERGROUP2, tab2_all_role)
+            .addRolesToGroup(USERGROUP3, tab1_read_role)
+            .addRolesToGroup(USERGROUP3, tab2_read_role)
+            .addPermissionsToRole(db_all_role, "server=server1->db=" + dbName)
+            .addPermissionsToRole("read_db_role",
+                    "server=server1->db=" + dbName + "->action=SELECT")
+            .addPermissionsToRole(tab1_all_role,
+                    "server=server1->db=" + dbName + "->table=" + tabName1)
+            .addPermissionsToRole(tab2_all_role,
+                    "server=server1->db=" + dbName + "->table=" + tabName2)
+            .addPermissionsToRole(tab1_read_role,
+                    "server=server1->db=" + dbName + "->table=" + tabName1 + "->action=SELECT")
+            .addPermissionsToRole(tab2_read_role,
+                    "server=server1->db=" + dbName + "->table=" + tabName2 + "->action=SELECT")
+            .setUserGroupMapping(StaticUserGroup.getStaticMapping());
+    writePolicyFile(policyFile);
   }
 
   @After
@@ -105,19 +122,42 @@ public class TestMetastoreEndToEnd extends
    * Setup admin privileges for user ADMIN1 verify user can create DB and tables
    * @throws Exception
    */
-  @Test
-  public void testServerPrivileges() throws Exception {
-    String tabName = "tab1";
-    HiveMetaStoreClient client = context.getMetaStoreClient(ADMIN1);
-    client.dropDatabase(dbName, true, true, true);
-
-    createMetastoreDB(client, dbName);
-    createMetastoreTable(client, dbName, tabName,
-        Lists.newArrayList(new FieldSchema("col1", "int", "")));
-    assertEquals(1, client.getTables(dbName, tabName).size());
-    client.dropTable(dbName, tabName);
-    client.dropDatabase(dbName, true, true, true);
-  }
+//  @Test
+//  public void testServerPrivileges() throws Exception {
+//    String tabName = "tab1";
+//    HiveMetaStoreClient client = context.getMetaStoreClient(ADMIN1);
+//    client.dropDatabase(dbName, true, true, true);
+//
+//    createMetastoreDB(client, dbName);
+//    createMetastoreTable(client, dbName, tabName,
+//        Lists.newArrayList(new FieldSchema("col1", "int", "")));
+//    assertEquals(1, client.getTables(dbName, tabName).size());
+//
+//    AuthzPathsCache authzPathCache = new AuthzPathsCache(null, new String[]{"/"}, 0);
+//    SentryPolicyServiceClient sentryClient = new SentryServiceClientFactory().create(sentryConf);
+//    waitToCommit(authzPathCache, sentryClient);
+//    assertEquals("/%PREFIX[data%DIR[db_1.db%AUTHZ_OBJECT#db_1[tab1%AUTHZ_OBJECT#db_1.tab1[]]]]", authzPathCache.serializeAllPaths());
+//    client.dropTable(dbName, tabName);
+//    client.dropDatabase(dbName, true, true, true);
+//    waitToCommit(authzPathCache, sentryClient);
+//    assertEquals("/%PREFIX[]", authzPathCache.serializeAllPaths());
+//  }
+//
+//  private void waitToCommit(AuthzPathsCache authzPathCache, SentryPolicyServiceClient sentryClient)
+//      throws Exception {
+//    SentryAuthzUpdate allUpdates = sentryClient.getAllUpdatesFrom(0, 0);
+//    for (HMSUpdate update : allUpdates.pathUpdates) {
+//      authzPathCache.handleUpdateNotification(update);
+//    }
+//    int counter = 0;
+//    while(!authzPathCache.areAllUpdatesCommited()) {
+//      Thread.sleep(200);
+//      counter++;
+//      if (counter > 10000) {
+//        fail("Updates taking too long to commit !!");
+//      }
+//    }
+//  }
 
   /**
    * verify non-admin user can not create or drop DB
@@ -477,7 +517,7 @@ public class TestMetastoreEndToEnd extends
    */
   @Test
   public void testPartionInsert() throws Exception {
-    String partVal1 = "part1", partVal2 = "part2", partVal3 = "part3";
+    String partVal1 = "part1", partVal2 = "part2", partVal3 = "part5";
 
     policyFile.addRolesToGroup(USERGROUP1, uri_role).addPermissionsToRole(
         uri_role, "server=server1->uri=file://" + dataFile.getPath());
@@ -501,6 +541,53 @@ public class TestMetastoreEndToEnd extends
         + " PARTITION (part_col='" + partVal2 + "') SELECT * FROM " + dbName
         + "." + tabName2, USER2_1);
     verifyPartitionExists(dbName, tabName1, partVal2);
+
+    // verify that user with Table all can add dynamic partition using INSERT
+    Map<String, String> dynamicInsertProperties = Maps.newHashMap();
+    dynamicInsertProperties.put(ConfVars.DYNAMICPARTITIONING.varname, "true");
+    dynamicInsertProperties.put(ConfVars.DYNAMICPARTITIONINGMODE.varname,
+        "nonstrict");
+
+    execHiveSQL("CREATE TABLE " + dbName + "." + tabName3
+        + " (id int) PARTITIONED BY (part_col string)", USER1_1);
+    execHiveSQLwithOverlay("INSERT OVERWRITE TABLE " + dbName + "." + tabName3
+        + " partition (part_col) SELECT id, part_col FROM "
+        + dbName + "." + tabName1, USER1_1, dynamicInsertProperties);
+  }
+
+  @Test
+  public void testAddPartion() throws Exception {
+    String partVal1 = "part1", partVal2 = "part2", partVal3 = "part5";
+    String newPath1 = "fooTab1";
+    String tabDir1 = hiveServer.getProperty(HiveServerFactory.WAREHOUSE_DIR)
+        + File.separator + newPath1;
+
+    policyFile.addRolesToGroup(USERGROUP1, uri_role).addPermissionsToRole(
+        uri_role, "server=server1->URI=" + tabDir1);
+    writePolicyFile(policyFile);
+
+    execHiveSQL("DROP TABLE IF EXISTS " + dbName + "." + tabName1, USER1_1);
+    execHiveSQL("CREATE TABLE " + dbName + "." + tabName1
+        + " (id int) PARTITIONED BY (part_col string)", USER1_1);
+
+    execHiveSQL("ALTER TABLE " + dbName + "." + tabName1
+        + " ADD PARTITION (part_col ='" + partVal1 +  "')", USER1_1);
+    verifyPartitionExists(dbName, tabName1, partVal1);
+
+    execHiveSQL("ALTER TABLE " + dbName + "." + tabName1
+        + " ADD PARTITION (part_col ='" + partVal2 +  "') location '"
+        + tabDir1 + "'", USER1_1);
+    verifyPartitionExists(dbName, tabName1, partVal2);
+
+    try {
+      execHiveSQL("ALTER TABLE " + dbName + "." + tabName1
+          + " ADD PARTITION (part_col ='" + partVal2 + "') location '"
+          + tabDir1 + "'", USER2_1);
+      fail("alter table should have failed due to missing URI privilege");
+    } catch (IOException e) {
+      // Expected error
+    }
+
   }
 
   private void verifyPartitionExists(String dbName, String tabName,
